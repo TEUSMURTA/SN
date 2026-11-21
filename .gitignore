@@ -29,3 +29,7 @@ tests/fixtures/
 *.glb
 *.tga
 *.png
+
+graphify-out/
+graph.json
+.mcp.json

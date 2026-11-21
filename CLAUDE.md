@@ -10,3 +10,7 @@ Port fiel e otimizado de *Scarlet Nexus* em Rust:
 1. Consulte este arquivo primeiro em vez de reler todo o repositório.
 2. Mantenha ust/save-data-names e evidências originais intactos; isole código específico de plataforma.
 3. Evite .unwrap() em entradas externas, use Result explícito e passe em cargo fmt --check, cargo clippy e cargo test.
+
+## Memória e Estado Atual
+- **Graphify MCP:** ativo, com 61 nós e 79 arestas.
+- **Repositório:** [TEUSMURTA/SN](https://github.com/TEUSMURTA/SN) ativo na branch `feat/dia-1-glb-otimizado`.
