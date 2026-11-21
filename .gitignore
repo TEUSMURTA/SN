@@ -39,3 +39,6 @@ litellm_config.yaml
 
 litellm_config.yaml
 *.bat
+
+litellm_config.yaml
+*.bat
