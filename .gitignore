@@ -33,3 +33,6 @@ tests/fixtures/
 graphify-out/
 graph.json
 .mcp.json
+
+litellm_config.yaml
+*.bat
