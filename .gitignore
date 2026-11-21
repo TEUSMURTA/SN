@@ -19,3 +19,13 @@ graphify.db
 .graphifyignore
 scarlet.rep/
 tools/*.exe
+
+tests/fixtures/
+*.pak
+*.uasset
+*.uexp
+*.ubulk
+*.gltf
+*.glb
+*.tga
+*.png
