@@ -1,0 +1,61 @@
+{
+  "schema": "rust-anything/bridge@1",
+  "root": "C:\\Users\\teusm\\Documents\\rea\\scarlet_nexus_rust\\reference",
+  "unit": "save_data_names.c",
+  "language": "c",
+  "kind": "c-abi",
+  "crate_name": "save-data-names",
+  "exports": [
+    {
+      "name": "save_data_name_index",
+      "file": "save_data_names.c",
+      "line": 26,
+      "params": [
+        {
+          "name": "param_1",
+          "ts_type": "int",
+          "optional": false,
+          "rest": false,
+          "native_type": "uint8_t"
+        }
+      ],
+      "returns": "int",
+      "is_async": false,
+      "is_generator": false,
+      "type_params": [],
+      "uses_instanceof": false,
+      "native_return": "uint8_t",
+      "prototype": "uint8_t save_data_name_index(uint8_t param_1)"
+    },
+    {
+      "name": "save_data_name_byte",
+      "file": "save_data_names.c",
+      "line": 31,
+      "params": [
+        {
+          "name": "param_1",
+          "ts_type": "int",
+          "optional": false,
+          "rest": false,
+          "native_type": "uint8_t"
+        },
+        {
+          "name": "offset",
+          "ts_type": "int",
+          "optional": false,
+          "rest": false,
+          "native_type": "uint8_t"
+        }
+      ],
+      "returns": "int",
+      "is_async": false,
+      "is_generator": false,
+      "type_params": [],
+      "uses_instanceof": false,
+      "native_return": "uint8_t",
+      "prototype": "uint8_t save_data_name_byte(uint8_t param_1, uint8_t offset)"
+    }
+  ],
+  "classes": [],
+  "js_only": []
+}
