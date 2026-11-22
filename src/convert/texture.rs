@@ -11,13 +11,24 @@ pub fn prepare_texture(
     options: &ConversionOptions,
 ) -> Result<PreparedTexture> {
     options.validate()?;
+    ensure_supported_target(options)?;
+    validate_texture(texture, options)?;
+    prepare_validated_texture(texture, options)
+}
+
+pub(crate) fn ensure_supported_target(options: &ConversionOptions) -> Result<()> {
     if options.texture_target == TextureTarget::Ktx2Basis {
         return Err(SnError::Unsupported(
             "KTX2/Basis encoding is not implemented; use the portable PNG profile".to_owned(),
         ));
     }
-    validate_texture(texture, options)?;
+    Ok(())
+}
 
+pub(crate) fn prepare_validated_texture(
+    texture: &TextureAsset,
+    options: &ConversionOptions,
+) -> Result<PreparedTexture> {
     let base = &texture.mips[0];
     let (width, height) =
         fit_dimensions(texture.width, texture.height, options.max_texture_dimension);
@@ -33,7 +44,7 @@ pub fn prepare_texture(
     })
 }
 
-fn validate_texture(texture: &TextureAsset, options: &ConversionOptions) -> Result<()> {
+pub(crate) fn validate_texture(texture: &TextureAsset, options: &ConversionOptions) -> Result<u64> {
     if texture.width == 0 || texture.height == 0 {
         return Err(SnError::InvalidData {
             resource: "texture dimensions",
@@ -96,11 +107,11 @@ fn validate_texture(texture: &TextureAsset, options: &ConversionOptions) -> Resu
                 limit: options.limits.max_texture_pixels,
             });
         }
-        if total_bytes > options.limits.max_texture_bytes {
+        if total_bytes > options.limits.max_texture_rgba_bytes {
             return Err(SnError::LimitExceeded {
-                resource: "texture bytes",
+                resource: "texture RGBA bytes",
                 actual: total_bytes,
-                limit: options.limits.max_texture_bytes,
+                limit: options.limits.max_texture_rgba_bytes,
             });
         }
         if mip.data.len() as u64 != expected_bytes {
@@ -115,7 +126,7 @@ fn validate_texture(texture: &TextureAsset, options: &ConversionOptions) -> Resu
         previous_width = mip.width;
         previous_height = mip.height;
     }
-    Ok(())
+    Ok(total_bytes)
 }
 
 fn fit_dimensions(width: u32, height: u32, maximum: Option<u32>) -> (u32, u32) {

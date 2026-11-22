@@ -278,7 +278,7 @@ fn validate_aggregate_limits(asset: &PreparedAsset, limits: &Limits) -> Result<(
 
     for tex in &asset.textures {
         let t_bytes = u64::try_from(tex.png_bytes.len()).map_err(|_| SnError::SizeOverflow {
-            resource: "texture bytes",
+            resource: "asset encoded texture bytes",
         })?;
         total_texture_bytes =
             total_texture_bytes
@@ -286,11 +286,11 @@ fn validate_aggregate_limits(asset: &PreparedAsset, limits: &Limits) -> Result<(
                 .ok_or(SnError::SizeOverflow {
                     resource: "total texture bytes",
                 })?;
-        if total_texture_bytes > limits.max_texture_bytes {
+        if total_texture_bytes > limits.max_asset_encoded_texture_bytes {
             return Err(SnError::LimitExceeded {
-                resource: "texture bytes",
+                resource: "asset encoded texture bytes",
                 actual: total_texture_bytes,
-                limit: limits.max_texture_bytes,
+                limit: limits.max_asset_encoded_texture_bytes,
             });
         }
     }
@@ -1058,7 +1058,7 @@ mod tests {
         let texture_bytes =
             u64::try_from(asset.textures[0].png_bytes.len()).expect("texture length fits u64");
         let limits = Limits {
-            max_texture_bytes: texture_bytes,
+            max_asset_encoded_texture_bytes: texture_bytes,
             ..Limits::default()
         };
         let error = build_glb_document(&asset, &limits)
@@ -1066,7 +1066,7 @@ mod tests {
         assert!(matches!(
             error,
             SnError::LimitExceeded {
-                resource: "texture bytes",
+                resource: "asset encoded texture bytes",
                 actual,
                 limit
             } if actual == texture_bytes * 2 && limit == texture_bytes

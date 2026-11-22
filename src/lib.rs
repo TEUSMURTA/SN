@@ -5,3 +5,5 @@ pub mod glb;
 pub mod io;
 pub mod model;
 pub mod platform;
+
+pub use convert::prepare_asset;

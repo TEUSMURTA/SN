@@ -13,17 +13,7 @@ pub fn convert_mesh(mesh: &MeshAsset, options: &ConversionOptions) -> Result<Mes
         ));
     }
 
-    let source = mesh
-        .lods
-        .get(options.lod)
-        .ok_or_else(|| SnError::InvalidData {
-            resource: "mesh LOD",
-            reason: format!(
-                "LOD {} was requested, but only {} LODs exist",
-                options.lod,
-                mesh.lods.len()
-            ),
-        })?;
+    let source = selected_lod(mesh, options.lod)?;
     if source.primitives.is_empty() {
         return Err(SnError::InvalidData {
             resource: "mesh",
@@ -38,6 +28,16 @@ pub fn convert_mesh(mesh: &MeshAsset, options: &ConversionOptions) -> Result<Mes
         .map(|primitive| convert_primitive(primitive, options))
         .collect::<Result<Vec<_>>>()
         .map(|primitives| MeshLod { primitives })
+}
+
+pub(crate) fn selected_lod(mesh: &MeshAsset, lod: usize) -> Result<&MeshLod> {
+    mesh.lods.get(lod).ok_or_else(|| SnError::InvalidData {
+        resource: "mesh LOD",
+        reason: format!(
+            "LOD {lod} was requested, but only {} LODs exist",
+            mesh.lods.len()
+        ),
+    })
 }
 
 fn convert_primitive(primitive: &Primitive, options: &ConversionOptions) -> Result<Primitive> {
