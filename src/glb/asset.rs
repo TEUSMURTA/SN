@@ -38,21 +38,28 @@ impl BinBuilder {
         Ok(())
     }
 
-    fn push_slice(&mut self, data: &[u8]) -> Result<(usize, usize)> {
+    fn reserve_chunk(&mut self, len: usize, resource: &'static str) -> Result<usize> {
         self.align_to_4()?;
         let offset = self.bytes.len();
-        let len = data.len();
         offset.checked_add(len).ok_or(SnError::SizeOverflow {
             resource: "GLB binary buffer",
         })?;
         self.bytes
             .try_reserve(len)
-            .map_err(|_| SnError::AllocationFailed {
-                resource: "GLB binary chunk",
-            })?;
-        self.bytes.extend_from_slice(data);
+            .map_err(|_| SnError::AllocationFailed { resource })?;
+        Ok(offset)
+    }
+
+    fn finish_chunk(&mut self, offset: usize, len: usize) -> Result<(usize, usize)> {
+        debug_assert_eq!(self.bytes.len(), offset + len);
         self.align_to_4()?;
         Ok((offset, len))
+    }
+
+    fn push_slice(&mut self, data: &[u8]) -> Result<(usize, usize)> {
+        let offset = self.reserve_chunk(data.len(), "GLB binary chunk")?;
+        self.bytes.extend_from_slice(data);
+        self.finish_chunk(offset, data.len())
     }
 
     fn push_f32_2(&mut self, values: &[[f32; 2]]) -> Result<(usize, usize)> {
@@ -65,16 +72,12 @@ impl BinBuilder {
             .ok_or(SnError::SizeOverflow {
                 resource: "GLB vec2 accessor",
             })?;
-        let mut raw = Vec::new();
-        raw.try_reserve(byte_len)
-            .map_err(|_| SnError::AllocationFailed {
-                resource: "GLB vec2 buffer",
-            })?;
+        let offset = self.reserve_chunk(byte_len, "GLB vec2 buffer")?;
         for v in values {
-            raw.extend_from_slice(&v[0].to_le_bytes());
-            raw.extend_from_slice(&v[1].to_le_bytes());
+            self.bytes.extend_from_slice(&v[0].to_le_bytes());
+            self.bytes.extend_from_slice(&v[1].to_le_bytes());
         }
-        self.push_slice(&raw)
+        self.finish_chunk(offset, byte_len)
     }
 
     fn push_f32_3(&mut self, values: &[[f32; 3]]) -> Result<(usize, usize)> {
@@ -87,17 +90,13 @@ impl BinBuilder {
             .ok_or(SnError::SizeOverflow {
                 resource: "GLB vec3 accessor",
             })?;
-        let mut raw = Vec::new();
-        raw.try_reserve(byte_len)
-            .map_err(|_| SnError::AllocationFailed {
-                resource: "GLB vec3 buffer",
-            })?;
+        let offset = self.reserve_chunk(byte_len, "GLB vec3 buffer")?;
         for v in values {
-            raw.extend_from_slice(&v[0].to_le_bytes());
-            raw.extend_from_slice(&v[1].to_le_bytes());
-            raw.extend_from_slice(&v[2].to_le_bytes());
+            self.bytes.extend_from_slice(&v[0].to_le_bytes());
+            self.bytes.extend_from_slice(&v[1].to_le_bytes());
+            self.bytes.extend_from_slice(&v[2].to_le_bytes());
         }
-        self.push_slice(&raw)
+        self.finish_chunk(offset, byte_len)
     }
 
     fn push_f32_4(&mut self, values: &[[f32; 4]]) -> Result<(usize, usize)> {
@@ -110,18 +109,14 @@ impl BinBuilder {
             .ok_or(SnError::SizeOverflow {
                 resource: "GLB vec4 accessor",
             })?;
-        let mut raw = Vec::new();
-        raw.try_reserve(byte_len)
-            .map_err(|_| SnError::AllocationFailed {
-                resource: "GLB vec4 buffer",
-            })?;
+        let offset = self.reserve_chunk(byte_len, "GLB vec4 buffer")?;
         for v in values {
-            raw.extend_from_slice(&v[0].to_le_bytes());
-            raw.extend_from_slice(&v[1].to_le_bytes());
-            raw.extend_from_slice(&v[2].to_le_bytes());
-            raw.extend_from_slice(&v[3].to_le_bytes());
+            self.bytes.extend_from_slice(&v[0].to_le_bytes());
+            self.bytes.extend_from_slice(&v[1].to_le_bytes());
+            self.bytes.extend_from_slice(&v[2].to_le_bytes());
+            self.bytes.extend_from_slice(&v[3].to_le_bytes());
         }
-        self.push_slice(&raw)
+        self.finish_chunk(offset, byte_len)
     }
 
     fn push_u16_4(&mut self, values: &[[u16; 4]]) -> Result<(usize, usize)> {
@@ -134,18 +129,14 @@ impl BinBuilder {
             .ok_or(SnError::SizeOverflow {
                 resource: "GLB joints accessor",
             })?;
-        let mut raw = Vec::new();
-        raw.try_reserve(byte_len)
-            .map_err(|_| SnError::AllocationFailed {
-                resource: "GLB joints buffer",
-            })?;
+        let offset = self.reserve_chunk(byte_len, "GLB joints buffer")?;
         for v in values {
-            raw.extend_from_slice(&v[0].to_le_bytes());
-            raw.extend_from_slice(&v[1].to_le_bytes());
-            raw.extend_from_slice(&v[2].to_le_bytes());
-            raw.extend_from_slice(&v[3].to_le_bytes());
+            self.bytes.extend_from_slice(&v[0].to_le_bytes());
+            self.bytes.extend_from_slice(&v[1].to_le_bytes());
+            self.bytes.extend_from_slice(&v[2].to_le_bytes());
+            self.bytes.extend_from_slice(&v[3].to_le_bytes());
         }
-        self.push_slice(&raw)
+        self.finish_chunk(offset, byte_len)
     }
 
     fn push_indices(&mut self, values: &[u32]) -> Result<(usize, usize, u32)> {
@@ -156,16 +147,12 @@ impl BinBuilder {
             .ok_or(SnError::SizeOverflow {
                 resource: "GLB index accessor",
             })?;
-        let mut raw = Vec::new();
-        raw.try_reserve_exact(byte_len)
-            .map_err(|_| SnError::AllocationFailed {
-                resource: "GLB index buffer",
-            })?;
+        let offset = self.reserve_chunk(byte_len, "GLB index buffer")?;
         for &value in values {
             let bytes = value.to_le_bytes();
-            raw.extend_from_slice(&bytes[..width]);
+            self.bytes.extend_from_slice(&bytes[..width]);
         }
-        let (offset, len) = self.push_slice(&raw)?;
+        let (offset, len) = self.finish_chunk(offset, byte_len)?;
         Ok((offset, len, component_type))
     }
 }
@@ -927,6 +914,100 @@ mod tests {
                 ..Material::default()
             }],
         }
+    }
+
+    #[test]
+    fn bin_builder_writes_attributes_little_endian_with_alignment() {
+        let mut bin = BinBuilder::new();
+        bin.bytes.push(0xaa);
+
+        let (uv_offset, uv_len) = bin
+            .push_f32_2(&[[1.0, -2.0]])
+            .expect("vec2 must be written");
+        assert_eq!((uv_offset, uv_len), (4, 8));
+        assert_eq!(&bin.bytes[..uv_offset], &[0xaa, 0, 0, 0]);
+        assert_eq!(
+            &bin.bytes[uv_offset..uv_offset + uv_len],
+            [1.0_f32.to_le_bytes(), (-2.0_f32).to_le_bytes()]
+                .concat()
+                .as_slice()
+        );
+
+        let (vec3_offset, vec3_len) = bin
+            .push_f32_3(&[[-0.0, 3.5, 4.0]])
+            .expect("vec3 must be written");
+        assert_eq!((vec3_offset, vec3_len), (12, 12));
+        assert_eq!(
+            &bin.bytes[vec3_offset..vec3_offset + vec3_len],
+            [
+                (-0.0_f32).to_le_bytes(),
+                3.5_f32.to_le_bytes(),
+                4.0_f32.to_le_bytes(),
+            ]
+            .concat()
+            .as_slice()
+        );
+
+        let (vec4_offset, vec4_len) = bin
+            .push_f32_4(&[[1.0, 2.0, 3.0, -1.0]])
+            .expect("vec4 must be written");
+        assert_eq!((vec4_offset, vec4_len), (24, 16));
+        assert_eq!(
+            &bin.bytes[vec4_offset..vec4_offset + vec4_len],
+            [
+                1.0_f32.to_le_bytes(),
+                2.0_f32.to_le_bytes(),
+                3.0_f32.to_le_bytes(),
+                (-1.0_f32).to_le_bytes(),
+            ]
+            .concat()
+            .as_slice()
+        );
+
+        let (joints_offset, joints_len) = bin
+            .push_u16_4(&[[0, 255, 256, u16::MAX]])
+            .expect("joints must be written");
+        assert_eq!((joints_offset, joints_len), (40, 8));
+        assert_eq!(
+            &bin.bytes[joints_offset..joints_offset + joints_len],
+            [
+                0_u16.to_le_bytes(),
+                255_u16.to_le_bytes(),
+                256_u16.to_le_bytes(),
+                u16::MAX.to_le_bytes(),
+            ]
+            .concat()
+            .as_slice()
+        );
+    }
+
+    #[test]
+    fn bin_builder_writes_each_index_width_little_endian() {
+        let mut bin = BinBuilder::new();
+
+        let (u8_offset, u8_len, u8_type) = bin
+            .push_indices(&[0, u32::from(u8::MAX), 2])
+            .expect("u8 indices must be written");
+        assert_eq!((u8_offset, u8_len, u8_type), (0, 3, 5121));
+        assert_eq!(bin.bytes, [0, u8::MAX, 2, 0]);
+
+        let (u16_offset, u16_len, u16_type) = bin
+            .push_indices(&[256, u32::from(u16::MAX)])
+            .expect("u16 indices must be written");
+        assert_eq!((u16_offset, u16_len, u16_type), (4, 4, 5123));
+        assert_eq!(
+            &bin.bytes[u16_offset..u16_offset + u16_len],
+            &[0, 1, 255, 255]
+        );
+
+        let (u32_offset, u32_len, u32_type) = bin
+            .push_indices(&[65_536, 0x0102_0304])
+            .expect("u32 indices must be written");
+        assert_eq!((u32_offset, u32_len, u32_type), (8, 8, 5125));
+        assert_eq!(
+            &bin.bytes[u32_offset..u32_offset + u32_len],
+            &[0, 0, 1, 0, 4, 3, 2, 1]
+        );
     }
 
     #[test]

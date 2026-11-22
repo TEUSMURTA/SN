@@ -1,4 +1,4 @@
-use std::io::Cursor;
+use std::{borrow::Cow, io::Cursor};
 
 use crate::{
     config::{ConversionOptions, TextureTarget},
@@ -22,7 +22,7 @@ pub fn prepare_texture(
     let (width, height) =
         fit_dimensions(texture.width, texture.height, options.max_texture_dimension);
     let rgba = resize_rgba(&base.data, texture.width, texture.height, width, height)?;
-    let png_bytes = encode_png(&rgba, width, height)?;
+    let png_bytes = encode_png(rgba.as_ref(), width, height)?;
 
     Ok(PreparedTexture {
         name: texture.name.clone(),
@@ -135,15 +135,16 @@ fn fit_dimensions(width: u32, height: u32, maximum: Option<u32>) -> (u32, u32) {
 }
 
 /// Nearest-neighbor resizing avoids mixing sRGB and linear channels or normal-map directions.
-fn resize_rgba(
-    source: &[u8],
+/// Returns the source slice unchanged when no resize is needed.
+fn resize_rgba<'a>(
+    source: &'a [u8],
     source_width: u32,
     source_height: u32,
     width: u32,
     height: u32,
-) -> Result<Vec<u8>> {
+) -> Result<Cow<'a, [u8]>> {
     if source_width == width && source_height == height {
-        return Ok(source.to_vec());
+        return Ok(Cow::Borrowed(source));
     }
     let output_len = u64::from(width)
         .checked_mul(u64::from(height))
@@ -173,7 +174,7 @@ fn resize_rgba(
             output.extend_from_slice(pixel);
         }
     }
-    Ok(output)
+    Ok(Cow::Owned(output))
 }
 
 fn encode_png(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>> {
@@ -214,10 +215,24 @@ mod tests {
     }
 
     #[test]
+    fn borrows_source_rgba_and_encodes_png_without_resize() {
+        let texture = texture();
+        let source = texture.mips[0].data.as_slice();
+        let rgba = resize_rgba(source, 2, 2, 2, 2).expect("matching dimensions must not resize");
+
+        assert!(matches!(&rgba, Cow::Borrowed(_)));
+        assert_eq!(rgba.as_ptr(), source.as_ptr());
+        let png = encode_png(rgba.as_ref(), 2, 2).expect("borrowed RGBA must encode");
+        assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
+    }
+
+    #[test]
     fn resizes_with_deterministic_nearest_sampling() {
+        let texture = texture();
         let resized =
-            resize_rgba(&texture().mips[0].data, 2, 2, 1, 1).expect("2x2 texture must resize");
-        assert_eq!(resized, [255, 0, 0, 255]);
+            resize_rgba(&texture.mips[0].data, 2, 2, 1, 1).expect("2x2 texture must resize");
+        assert!(matches!(&resized, Cow::Owned(_)));
+        assert_eq!(resized.as_ref(), [255, 0, 0, 255]);
     }
 
     #[test]
