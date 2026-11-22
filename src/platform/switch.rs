@@ -16,6 +16,7 @@ pub fn conversion_options() -> ConversionOptions {
             max_texture_rgba_bytes: 16 * 1024 * 1024,
             max_asset_rgba_bytes: 32 * 1024 * 1024,
             max_asset_encoded_texture_bytes: 32 * 1024 * 1024,
+            max_asset_gpu_texture_bytes: Some(32 * 1024 * 1024),
         },
         max_texture_dimension: Some(1024),
         texture_target: TextureTarget::Png,
@@ -42,6 +43,7 @@ mod tests {
                 max_texture_rgba_bytes: 16 * 1024 * 1024,
                 max_asset_rgba_bytes: 32 * 1024 * 1024,
                 max_asset_encoded_texture_bytes: 32 * 1024 * 1024,
+                max_asset_gpu_texture_bytes: Some(32 * 1024 * 1024),
             }
         );
         assert_eq!(options.max_texture_dimension, Some(1024));

@@ -5,7 +5,9 @@ use serde_json::{Value, json};
 use crate::config::Limits;
 use crate::error::{Result, SnError};
 use crate::glb::{padded_len, write_glb_container};
-use crate::model::{ColorSpace, ConversionReport, Material, PreparedAsset, PreparedTexture};
+use crate::model::{
+    ColorSpace, ConversionReport, Material, PreparedAsset, PreparedTexture, PreparedTexturePayload,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GlbDocument {
@@ -195,7 +197,7 @@ fn add_binary_values(total: &mut u64, count: usize, item_bytes: usize) -> Result
 fn validate_binary_budget(asset: &PreparedAsset, limits: &Limits) -> Result<()> {
     let mut binary_len = 0_u64;
     for texture in &asset.textures {
-        add_binary_values(&mut binary_len, texture.png_bytes.len(), 1)?;
+        add_binary_values(&mut binary_len, texture.payload.encoded_len(), 1)?;
     }
     for primitive in &asset.mesh.primitives {
         let attributes = &primitive.attributes;
@@ -229,10 +231,14 @@ fn validate_binary_budget(asset: &PreparedAsset, limits: &Limits) -> Result<()> 
     Ok(())
 }
 
-fn validate_aggregate_limits(asset: &PreparedAsset, limits: &Limits) -> Result<(u64, u64, u64)> {
+fn validate_aggregate_limits(
+    asset: &PreparedAsset,
+    limits: &Limits,
+) -> Result<(u64, u64, u64, u64)> {
     let mut total_vertices: u64 = 0;
     let mut total_indices: u64 = 0;
     let mut total_texture_bytes: u64 = 0;
+    let mut total_gpu_texture_bytes: u64 = 0;
 
     let max_vertices = u64::try_from(limits.max_vertices).map_err(|_| SnError::SizeOverflow {
         resource: "vertices limit",
@@ -277,9 +283,10 @@ fn validate_aggregate_limits(asset: &PreparedAsset, limits: &Limits) -> Result<(
     }
 
     for tex in &asset.textures {
-        let t_bytes = u64::try_from(tex.png_bytes.len()).map_err(|_| SnError::SizeOverflow {
-            resource: "asset encoded texture bytes",
-        })?;
+        let t_bytes =
+            u64::try_from(tex.payload.encoded_len()).map_err(|_| SnError::SizeOverflow {
+                resource: "asset encoded texture bytes",
+            })?;
         total_texture_bytes =
             total_texture_bytes
                 .checked_add(t_bytes)
@@ -293,9 +300,32 @@ fn validate_aggregate_limits(asset: &PreparedAsset, limits: &Limits) -> Result<(
                 limit: limits.max_asset_encoded_texture_bytes,
             });
         }
+
+        if let Some(gpu) = tex.gpu {
+            total_gpu_texture_bytes =
+                total_gpu_texture_bytes
+                    .checked_add(gpu.byte_len)
+                    .ok_or(SnError::SizeOverflow {
+                        resource: "asset GPU texture bytes",
+                    })?;
+            if let Some(limit) = limits.max_asset_gpu_texture_bytes
+                && total_gpu_texture_bytes > limit
+            {
+                return Err(SnError::LimitExceeded {
+                    resource: "asset GPU texture bytes",
+                    actual: total_gpu_texture_bytes,
+                    limit,
+                });
+            }
+        }
     }
 
-    Ok((total_vertices, total_indices, total_texture_bytes))
+    Ok((
+        total_vertices,
+        total_indices,
+        total_texture_bytes,
+        total_gpu_texture_bytes,
+    ))
 }
 
 fn validate_asset(asset: &PreparedAsset) -> Result<()> {
@@ -505,15 +535,22 @@ fn push_textures_to_bin(
     buffer_views: &mut Vec<Value>,
     images: &mut Vec<Value>,
     gltf_textures: &mut Vec<Value>,
-) -> Result<()> {
+) -> Result<bool> {
+    let mut uses_ktx2_basis = false;
     for (tex_idx, tex) in textures.iter().enumerate() {
-        let (offset, len) = bin.push_slice(&tex.png_bytes)?;
+        let (offset, len) = bin.push_slice(tex.payload.encoded_bytes())?;
         let bv_idx = buffer_views.len();
         buffer_views.push(json!({
             "buffer": 0,
             "byteOffset": offset,
             "byteLength": len
         }));
+
+        let (mime_type, is_ktx2_basis) = match &tex.payload {
+            PreparedTexturePayload::Png(_) => ("image/png", false),
+            PreparedTexturePayload::Ktx2Basis(_) => ("image/ktx2", true),
+        };
+        uses_ktx2_basis |= is_ktx2_basis;
 
         let img_name = if tex.name.is_empty() {
             format!("image_{tex_idx}")
@@ -522,7 +559,7 @@ fn push_textures_to_bin(
         };
         images.push(json!({
             "name": img_name,
-            "mimeType": "image/png",
+            "mimeType": mime_type,
             "bufferView": bv_idx
         }));
 
@@ -533,17 +570,26 @@ fn push_textures_to_bin(
         };
         let mut tex_obj = serde_json::Map::new();
         tex_obj.insert("name".to_owned(), json!(tex_name));
-        tex_obj.insert("source".to_owned(), json!(tex_idx));
+        if is_ktx2_basis {
+            tex_obj.insert(
+                "extensions".to_owned(),
+                json!({
+                    "KHR_texture_basisu": { "source": tex_idx }
+                }),
+            );
+        } else {
+            tex_obj.insert("source".to_owned(), json!(tex_idx));
+        }
         if matches!(tex.color_space, ColorSpace::Srgb | ColorSpace::Linear) {
             gltf_textures.push(Value::Object(tex_obj));
         }
     }
-    Ok(())
+    Ok(uses_ktx2_basis)
 }
 
 pub fn build_glb_document(asset: &PreparedAsset, limits: &Limits) -> Result<GlbDocument> {
     validate_asset(asset)?;
-    let (total_vertices, total_indices, total_texture_bytes) =
+    let (total_vertices, total_indices, total_texture_bytes, total_gpu_texture_bytes) =
         validate_aggregate_limits(asset, limits)?;
     validate_binary_budget(asset, limits)?;
 
@@ -553,7 +599,7 @@ pub fn build_glb_document(asset: &PreparedAsset, limits: &Limits) -> Result<GlbD
     let mut images: Vec<Value> = Vec::new();
     let mut gltf_textures: Vec<Value> = Vec::new();
 
-    push_textures_to_bin(
+    let uses_ktx2_basis = push_textures_to_bin(
         &asset.textures,
         &mut bin,
         &mut buffer_views,
@@ -814,6 +860,13 @@ pub fn build_glb_document(asset: &PreparedAsset, limits: &Limits) -> Result<GlbD
     if !images.is_empty() {
         root.insert("images".to_owned(), Value::Array(images));
     }
+    if uses_ktx2_basis {
+        root.insert("extensionsUsed".to_owned(), json!(["KHR_texture_basisu"]));
+        root.insert(
+            "extensionsRequired".to_owned(),
+            json!(["KHR_texture_basisu"]),
+        );
+    }
 
     let json_bytes =
         serde_json::to_vec(&Value::Object(root)).map_err(|e| SnError::InvalidData {
@@ -843,9 +896,12 @@ pub fn build_glb_document(asset: &PreparedAsset, limits: &Limits) -> Result<GlbD
             resource: "total indices",
         })?,
         texture_count: asset.textures.len(),
-        texture_bytes: usize::try_from(total_texture_bytes).map_err(|_| SnError::SizeOverflow {
-            resource: "total texture bytes",
+        encoded_texture_bytes: usize::try_from(total_texture_bytes).map_err(|_| {
+            SnError::SizeOverflow {
+                resource: "total texture bytes",
+            }
         })?,
+        gpu_texture_bytes: total_gpu_texture_bytes,
     };
 
     Ok(GlbDocument {
@@ -875,7 +931,7 @@ pub fn write_prepared_glb<W: Write + ?Sized>(
 mod tests {
     use super::*;
     use crate::glb::validate_glb;
-    use crate::model::{MeshLod, Primitive, VertexAttributes};
+    use crate::model::{GpuTextureFormat, GpuTextureInfo, MeshLod, Primitive, VertexAttributes};
 
     fn sample_prepared_asset() -> PreparedAsset {
         let png_1x1: Vec<u8> = vec![
@@ -906,7 +962,8 @@ mod tests {
                 width: 1,
                 height: 1,
                 color_space: ColorSpace::Srgb,
-                png_bytes: png_1x1,
+                payload: PreparedTexturePayload::Png(png_1x1),
+                gpu: None,
             }],
             materials: vec![Material {
                 name: "TriangleMat".to_owned(),
@@ -1032,6 +1089,16 @@ mod tests {
             json_val["materials"][0]["pbrMetallicRoughness"]["baseColorTexture"]["index"],
             0
         );
+        assert_eq!(json_val["images"][0]["mimeType"], "image/png");
+        assert_eq!(json_val["textures"][0]["source"], 0);
+        assert!(json_val["textures"][0].get("extensions").is_none());
+        assert!(json_val.get("extensionsUsed").is_none());
+        assert!(json_val.get("extensionsRequired").is_none());
+        assert_eq!(
+            report.encoded_texture_bytes,
+            asset.textures[0].payload.encoded_len()
+        );
+        assert_eq!(report.gpu_texture_bytes, 0);
     }
 
     #[test]
@@ -1052,11 +1119,88 @@ mod tests {
     }
 
     #[test]
+    fn exports_synthetic_ktx2_basis_with_required_extension() {
+        let ktx2_bytes = vec![
+            0xab, 0x4b, 0x54, 0x58, 0x20, 0x32, 0x30, 0xbb, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4,
+        ];
+        let mut asset = sample_prepared_asset();
+        asset.textures[0].payload = PreparedTexturePayload::Ktx2Basis(ktx2_bytes.clone());
+        asset.textures[0].gpu = Some(GpuTextureInfo {
+            format: GpuTextureFormat::Bc7,
+            mip_count: 1,
+            byte_len: 4096,
+        });
+
+        let document = build_glb_document(&asset, &Limits::default())
+            .expect("synthetic KTX2 payload must export without a codec");
+        let json: Value = serde_json::from_slice(&document.json).expect("valid glTF JSON");
+        assert_eq!(json["images"][0]["mimeType"], "image/ktx2");
+        assert!(json["textures"][0].get("source").is_none());
+        assert_eq!(
+            json["textures"][0]["extensions"]["KHR_texture_basisu"]["source"],
+            0
+        );
+        assert_eq!(json["extensionsUsed"], json!(["KHR_texture_basisu"]));
+        assert_eq!(json["extensionsRequired"], json!(["KHR_texture_basisu"]));
+
+        let view_index = usize::try_from(
+            json["images"][0]["bufferView"]
+                .as_u64()
+                .expect("bufferView index must be an integer"),
+        )
+        .expect("bufferView index must fit usize");
+        let offset = usize::try_from(
+            json["bufferViews"][view_index]["byteOffset"]
+                .as_u64()
+                .expect("bufferView offset must be an integer"),
+        )
+        .expect("bufferView offset must fit usize");
+        assert_eq!(
+            json["bufferViews"][view_index]["byteLength"],
+            ktx2_bytes.len()
+        );
+        assert_eq!(
+            &document.binary[offset..offset + ktx2_bytes.len()],
+            ktx2_bytes
+        );
+        assert_eq!(document.report.encoded_texture_bytes, ktx2_bytes.len());
+        assert_eq!(document.report.gpu_texture_bytes, 4096);
+    }
+
+    #[test]
+    fn rejects_gpu_texture_budget_independently_of_encoded_bytes() {
+        let mut asset = sample_prepared_asset();
+        let encoded_limit = u64::try_from(asset.textures[0].payload.encoded_len())
+            .expect("texture length fits u64");
+        asset.textures[0].gpu = Some(GpuTextureInfo {
+            format: GpuTextureFormat::Rgba8,
+            mip_count: 1,
+            byte_len: 4096,
+        });
+        let limits = Limits {
+            max_asset_encoded_texture_bytes: encoded_limit,
+            max_asset_gpu_texture_bytes: Some(4095),
+            ..Limits::default()
+        };
+
+        let error = build_glb_document(&asset, &limits)
+            .expect_err("GPU footprint must fail even when encoded bytes fit exactly");
+        assert!(matches!(
+            error,
+            SnError::LimitExceeded {
+                resource: "asset GPU texture bytes",
+                actual: 4096,
+                limit: 4095
+            }
+        ));
+    }
+
+    #[test]
     fn rejects_aggregate_texture_bytes_before_building_buffers() {
         let mut asset = sample_prepared_asset();
         asset.textures.push(asset.textures[0].clone());
-        let texture_bytes =
-            u64::try_from(asset.textures[0].png_bytes.len()).expect("texture length fits u64");
+        let texture_bytes = u64::try_from(asset.textures[0].payload.encoded_len())
+            .expect("texture length fits u64");
         let limits = Limits {
             max_asset_encoded_texture_bytes: texture_bytes,
             ..Limits::default()

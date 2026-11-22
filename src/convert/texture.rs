@@ -3,7 +3,7 @@ use std::{borrow::Cow, io::Cursor};
 use crate::{
     config::{ConversionOptions, TextureTarget},
     error::{Result, SnError},
-    model::{PreparedTexture, TextureAsset, TextureFormat},
+    model::{PreparedTexture, PreparedTexturePayload, TextureAsset, TextureFormat},
 };
 
 pub fn prepare_texture(
@@ -40,7 +40,8 @@ pub(crate) fn prepare_validated_texture(
         width,
         height,
         color_space: texture.color_space,
-        png_bytes,
+        payload: PreparedTexturePayload::Png(png_bytes),
+        gpu: None,
     })
 }
 
@@ -254,7 +255,18 @@ mod tests {
         };
         let prepared = prepare_texture(&texture(), &options).expect("texture must encode");
         assert_eq!((prepared.width, prepared.height), (1, 1));
-        assert!(prepared.png_bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
+        assert!(matches!(prepared.payload, PreparedTexturePayload::Png(_)));
+        assert!(
+            prepared
+                .payload
+                .encoded_bytes()
+                .starts_with(b"\x89PNG\r\n\x1a\n")
+        );
+        assert_eq!(
+            prepared.payload.encoded_len(),
+            prepared.payload.encoded_bytes().len()
+        );
+        assert!(prepared.gpu.is_none());
     }
 
     #[test]

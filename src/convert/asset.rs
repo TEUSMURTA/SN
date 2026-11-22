@@ -5,7 +5,7 @@ use crate::{
         texture::{ensure_supported_target, prepare_validated_texture, validate_texture},
     },
     error::{Result, SnError},
-    model::{Asset, MeshLod, PreparedAsset},
+    model::{Asset, MeshLod, PreparedAsset, PreparedTexture},
 };
 
 #[derive(Debug, Default)]
@@ -14,6 +14,7 @@ struct AssetUsage {
     indices: u64,
     rgba_bytes: u64,
     encoded_texture_bytes: u64,
+    gpu_texture_bytes: u64,
 }
 
 impl AssetUsage {
@@ -64,6 +65,24 @@ impl AssetUsage {
         )?;
         Ok(())
     }
+
+    fn add_prepared_texture(&mut self, texture: &PreparedTexture, limits: &Limits) -> Result<()> {
+        self.add_encoded_texture(texture.payload.encoded_len(), limits)?;
+        if let Some(gpu) = texture.gpu {
+            self.add_gpu_texture(gpu.byte_len, limits)?;
+        }
+        Ok(())
+    }
+
+    fn add_gpu_texture(&mut self, bytes: u64, limits: &Limits) -> Result<()> {
+        self.gpu_texture_bytes = checked_add_usage(
+            self.gpu_texture_bytes,
+            bytes,
+            limits.max_asset_gpu_texture_bytes.unwrap_or(u64::MAX),
+            "asset GPU texture bytes",
+        )?;
+        Ok(())
+    }
 }
 
 fn checked_add_usage(total: u64, amount: u64, limit: u64, resource: &'static str) -> Result<u64> {
@@ -102,7 +121,7 @@ pub fn prepare_asset(asset: &Asset, options: &ConversionOptions) -> Result<Prepa
         })?;
     for texture in &asset.textures {
         let prepared = prepare_validated_texture(texture, options)?;
-        usage.add_encoded_texture(prepared.png_bytes.len(), &options.limits)?;
+        usage.add_prepared_texture(&prepared, &options.limits)?;
         textures.push(prepared);
     }
 
@@ -120,8 +139,8 @@ mod tests {
     use crate::{
         convert::texture::prepare_texture,
         model::{
-            ColorSpace, MeshAsset, MipLevel, Primitive, TextureAsset, TextureFormat,
-            VertexAttributes,
+            ColorSpace, GpuTextureFormat, GpuTextureInfo, MeshAsset, MipLevel,
+            PreparedTexturePayload, Primitive, TextureAsset, TextureFormat, VertexAttributes,
         },
     };
 
@@ -215,8 +234,8 @@ mod tests {
     fn rejects_png_bytes_aggregated_across_textures() {
         let encoded_len = prepare_texture(&texture("measure"), &ConversionOptions::default())
             .expect("texture must encode")
-            .png_bytes
-            .len();
+            .payload
+            .encoded_len();
         let encoded_limit = u64::try_from(encoded_len).expect("PNG length must fit u64");
         let options = ConversionOptions {
             limits: Limits {
@@ -288,6 +307,70 @@ mod tests {
                 resource: "indices",
                 actual: 9,
                 limit: 6
+            }
+        ));
+    }
+
+    fn prepared_texture_with_gpu(bytes: u64) -> PreparedTexture {
+        PreparedTexture {
+            name: "synthetic".to_owned(),
+            width: 1,
+            height: 1,
+            color_space: ColorSpace::Srgb,
+            payload: PreparedTexturePayload::Ktx2Basis(vec![0xab, 0x4b, 0x54, 0x58]),
+            gpu: Some(GpuTextureInfo {
+                format: GpuTextureFormat::Bc7,
+                mip_count: 1,
+                byte_len: bytes,
+            }),
+        }
+    }
+
+    #[test]
+    fn rejects_gpu_budget_independently_of_encoded_bytes() {
+        let limits = Limits {
+            max_asset_encoded_texture_bytes: 8,
+            max_asset_gpu_texture_bytes: Some(12),
+            ..Limits::default()
+        };
+        let mut usage = AssetUsage::default();
+        usage
+            .add_prepared_texture(&prepared_texture_with_gpu(8), &limits)
+            .expect("first texture must fit both independent budgets");
+        assert_eq!(usage.encoded_texture_bytes, 4);
+        assert_eq!(usage.gpu_texture_bytes, 8);
+
+        let error = usage
+            .add_prepared_texture(&prepared_texture_with_gpu(8), &limits)
+            .expect_err("second GPU footprint must exceed only the GPU budget");
+        assert_eq!(usage.encoded_texture_bytes, 8);
+        assert!(matches!(
+            error,
+            SnError::LimitExceeded {
+                resource: "asset GPU texture bytes",
+                actual: 16,
+                limit: 12
+            }
+        ));
+    }
+
+    #[test]
+    fn gpu_budget_is_optional_but_still_detects_overflow() {
+        let limits = Limits {
+            max_asset_gpu_texture_bytes: None,
+            ..Limits::default()
+        };
+        let mut usage = AssetUsage {
+            gpu_texture_bytes: u64::MAX - 3,
+            ..AssetUsage::default()
+        };
+        let error = usage
+            .add_gpu_texture(4, &limits)
+            .expect_err("GPU accounting must detect overflow even without a limit");
+        assert!(matches!(
+            error,
+            SnError::SizeOverflow {
+                resource: "asset GPU texture bytes"
             }
         ));
     }

@@ -18,6 +18,9 @@ pub struct Limits {
     pub max_asset_rgba_bytes: u64,
     /// Maximum encoded PNG/KTX2 bytes aggregated across all textures in an asset.
     pub max_asset_encoded_texture_bytes: u64,
+    /// Maximum declared GPU texture footprint, independent of the GLB byte budget.
+    /// `None` disables this budget until a runtime GPU layout is known.
+    pub max_asset_gpu_texture_bytes: Option<u64>,
 }
 
 impl Default for Limits {
@@ -31,6 +34,7 @@ impl Default for Limits {
             max_texture_rgba_bytes: 64 * 1024 * 1024,
             max_asset_rgba_bytes: 256 * 1024 * 1024,
             max_asset_encoded_texture_bytes: 64 * 1024 * 1024,
+            max_asset_gpu_texture_bytes: None,
         }
     }
 }
@@ -115,6 +119,7 @@ mod tests {
             max_texture_rgba_bytes: 16,
             max_asset_rgba_bytes: 16,
             max_asset_encoded_texture_bytes: 32,
+            max_asset_gpu_texture_bytes: None,
         }
     }
 
@@ -181,6 +186,22 @@ mod tests {
             ..ConversionOptions::default()
         };
         assert_invalid(&options, "max_asset_encoded_texture_bytes");
+    }
+
+    #[test]
+    fn gpu_texture_budget_is_independent_of_glb_budget() {
+        let options = ConversionOptions {
+            limits: Limits {
+                max_asset_bytes: 16,
+                max_asset_encoded_texture_bytes: 16,
+                max_asset_gpu_texture_bytes: Some(1024),
+                ..compact_limits()
+            },
+            ..ConversionOptions::default()
+        };
+        options
+            .validate()
+            .expect("GPU footprint may exceed the encoded GLB budget");
     }
 
     #[test]

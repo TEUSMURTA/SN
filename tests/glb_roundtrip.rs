@@ -65,7 +65,7 @@ fn exports_mesh_and_png_as_a_gltf_document() {
             ..Material::default()
         }],
     };
-    let texture_bytes = prepared.textures[0].png_bytes.len();
+    let texture_bytes = prepared.textures[0].payload.encoded_len();
     let mut output = Vec::new();
     let report = write_prepared_glb(&mut output, &prepared, &options.limits)
         .expect("prepared asset must export");
@@ -74,7 +74,8 @@ fn exports_mesh_and_png_as_a_gltf_document() {
     assert_eq!(report.vertex_count, 3);
     assert_eq!(report.index_count, 3);
     assert_eq!(report.texture_count, 1);
-    assert_eq!(report.texture_bytes, texture_bytes);
+    assert_eq!(report.encoded_texture_bytes, texture_bytes);
+    assert_eq!(report.gpu_texture_bytes, 0);
     assert_eq!(report.glb_bytes, output.len());
 
     let document = gltf::Gltf::from_slice(&output).expect("gltf crate must validate the document");
@@ -127,7 +128,10 @@ fn exports_mesh_and_png_as_a_gltf_document() {
             assert_eq!(mime_type, "image/png");
             let start = view.offset();
             let end = start + view.length();
-            assert_eq!(&blob[start..end], &prepared.textures[0].png_bytes);
+            assert_eq!(
+                &blob[start..end],
+                prepared.textures[0].payload.encoded_bytes()
+            );
         }
         other => panic!("expected buffer-view image, got {other:?}"),
     }

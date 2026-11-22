@@ -110,12 +110,48 @@ pub struct PreparedAsset {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PreparedTexturePayload {
+    Png(Vec<u8>),
+    Ktx2Basis(Vec<u8>),
+}
+
+impl PreparedTexturePayload {
+    #[must_use]
+    pub fn encoded_bytes(&self) -> &[u8] {
+        match self {
+            Self::Png(bytes) | Self::Ktx2Basis(bytes) => bytes,
+        }
+    }
+
+    #[must_use]
+    pub fn encoded_len(&self) -> usize {
+        self.encoded_bytes().len()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GpuTextureFormat {
+    Rgba8,
+    Bc7,
+    Astc4x4,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GpuTextureInfo {
+    pub format: GpuTextureFormat,
+    pub mip_count: u32,
+    pub byte_len: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PreparedTexture {
     pub name: String,
     pub width: u32,
     pub height: u32,
     pub color_space: ColorSpace,
-    pub png_bytes: Vec<u8>,
+    pub payload: PreparedTexturePayload,
+    /// Runtime GPU layout, when validated; unrelated to the encoded file length.
+    pub gpu: Option<GpuTextureInfo>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -125,5 +161,8 @@ pub struct ConversionReport {
     pub vertex_count: usize,
     pub index_count: usize,
     pub texture_count: usize,
-    pub texture_bytes: usize,
+    /// Encoded PNG/KTX2 bytes stored in the GLB.
+    pub encoded_texture_bytes: usize,
+    /// Sum of declared GPU footprints; textures without GPU metadata contribute zero.
+    pub gpu_texture_bytes: u64,
 }
