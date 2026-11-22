@@ -1,5 +1,5 @@
 use crate::{
-    config::ConversionOptions,
+    config::{ConversionOptions, Limits},
     error::{Result, SnError},
     model::{MeshAsset, MeshLod, Primitive, VertexAttributes},
 };
@@ -31,6 +31,7 @@ pub fn convert_mesh(mesh: &MeshAsset, options: &ConversionOptions) -> Result<Mes
         });
     }
 
+    checked_mesh_totals(source, &options.limits)?;
     source
         .primitives
         .iter()
@@ -48,28 +49,34 @@ fn convert_primitive(primitive: &Primitive, options: &ConversionOptions) -> Resu
             reason: "POSITION cannot be empty".to_owned(),
         });
     }
-    check_limit(
-        "vertices",
-        vertex_count,
-        options.limits.max_vertices,
-    )?;
-    check_limit("indices", primitive.indices.len(), options.limits.max_indices)?;
-    if primitive.indices.is_empty() || primitive.indices.len() % 3 != 0 {
+    if primitive.indices.is_empty() || !primitive.indices.len().is_multiple_of(3) {
         return Err(SnError::InvalidData {
             resource: "indices",
             reason: "indices must contain complete, non-empty triangles".to_owned(),
         });
     }
 
-    check_attribute_len("normals", source.normals.as_ref().map(Vec::len), vertex_count)?;
-    check_attribute_len("tangents", source.tangents.as_ref().map(Vec::len), vertex_count)?;
+    check_attribute_len(
+        "normals",
+        source.normals.as_ref().map(Vec::len),
+        vertex_count,
+    )?;
+    check_attribute_len(
+        "tangents",
+        source.tangents.as_ref().map(Vec::len),
+        vertex_count,
+    )?;
     check_attribute_len(
         "texture coordinates",
         source.texcoords.as_ref().map(Vec::len),
         vertex_count,
     )?;
     check_attribute_len("joints", source.joints.as_ref().map(Vec::len), vertex_count)?;
-    check_attribute_len("weights", source.weights.as_ref().map(Vec::len), vertex_count)?;
+    check_attribute_len(
+        "weights",
+        source.weights.as_ref().map(Vec::len),
+        vertex_count,
+    )?;
     if source.joints.is_some() || source.weights.is_some() {
         return Err(SnError::Unsupported(
             "JOINTS_0 and WEIGHTS_0 export is not implemented".to_owned(),
@@ -113,7 +120,7 @@ fn convert_primitive(primitive: &Primitive, options: &ConversionOptions) -> Resu
         .transpose()?;
 
     let mut indices = Vec::with_capacity(primitive.indices.len());
-    for triangle in primitive.indices.chunks_exact(3) {
+    for triangle in primitive.indices.as_chunks::<3>().0 {
         for index in triangle {
             let index = usize::try_from(*index).map_err(|_| SnError::InvalidData {
                 resource: "indices",
@@ -143,15 +150,48 @@ fn convert_primitive(primitive: &Primitive, options: &ConversionOptions) -> Resu
     })
 }
 
-fn check_limit(resource: &'static str, actual: usize, limit: usize) -> Result<()> {
-    if actual > limit {
+pub(crate) fn checked_mesh_totals(mesh: &MeshLod, limits: &Limits) -> Result<(usize, usize)> {
+    let vertex_limit = u64::try_from(limits.max_vertices).map_err(|_| SnError::SizeOverflow {
+        resource: "vertices",
+    })?;
+    let index_limit = u64::try_from(limits.max_indices).map_err(|_| SnError::SizeOverflow {
+        resource: "indices",
+    })?;
+    let mut vertices = 0_u64;
+    let mut indices = 0_u64;
+
+    for primitive in &mesh.primitives {
+        vertices = checked_total(
+            vertices,
+            primitive.attributes.positions.len(),
+            vertex_limit,
+            "vertices",
+        )?;
+        indices = checked_total(indices, primitive.indices.len(), index_limit, "indices")?;
+    }
+
+    let vertices = usize::try_from(vertices).map_err(|_| SnError::SizeOverflow {
+        resource: "vertices",
+    })?;
+    let indices = usize::try_from(indices).map_err(|_| SnError::SizeOverflow {
+        resource: "indices",
+    })?;
+    Ok((vertices, indices))
+}
+
+fn checked_total(total: u64, count: usize, limit: u64, resource: &'static str) -> Result<u64> {
+    let count = u64::try_from(count).map_err(|_| SnError::SizeOverflow { resource })?;
+    let total = total
+        .checked_add(count)
+        .ok_or(SnError::SizeOverflow { resource })?;
+    if total > limit {
         return Err(SnError::LimitExceeded {
             resource,
-            actual: actual as u64,
-            limit: limit as u64,
+            actual: total,
+            limit,
         });
     }
-    Ok(())
+    Ok(total)
 }
 
 fn check_attribute_len(
@@ -183,10 +223,7 @@ fn convert_normal(normal: [f32; 3], resource: &'static str) -> Result<[f32; 3]> 
 
 fn convert_tangent(tangent: [f32; 4]) -> Result<[f32; 4]> {
     ensure_finite(&tangent, "tangents")?;
-    let xyz = normalize(
-        [-tangent[1], tangent[2], tangent[0]],
-        "tangents",
-    )?;
+    let xyz = normalize([-tangent[1], tangent[2], tangent[0]], "tangents")?;
     if tangent[3] == 0.0 {
         return Err(SnError::InvalidData {
             resource: "tangents",
@@ -199,10 +236,7 @@ fn convert_tangent(tangent: [f32; 4]) -> Result<[f32; 4]> {
 
 fn convert_uv(uv: [f32; 2], flip_v: bool) -> Result<[f32; 2]> {
     ensure_finite(&uv, "texture coordinates")?;
-    Ok([
-        uv[0],
-        if flip_v { 1.0 - uv[1] } else { uv[1] },
-    ])
+    Ok([uv[0], if flip_v { 1.0 - uv[1] } else { uv[1] }])
 }
 
 fn ensure_finite(values: &[f32], resource: &'static str) -> Result<()> {
@@ -269,7 +303,10 @@ mod tests {
             attributes.positions,
             [[0.0, 0.0, 0.0], [0.0, 0.0, 1.0], [-1.0, 0.0, 0.0]]
         );
-        assert_eq!(attributes.normals.as_ref().expect("normals")[0], [0.0, 1.0, 0.0]);
+        assert_eq!(
+            attributes.normals.as_ref().expect("normals")[0],
+            [0.0, 1.0, 0.0]
+        );
         assert_eq!(
             attributes.tangents.as_ref().expect("tangents")[0],
             [0.0, 0.0, 1.0, -1.0]
@@ -328,13 +365,57 @@ mod tests {
             lod: 1,
             ..ConversionOptions::default()
         };
-        let error = convert_mesh(&mesh_with(triangle()), &options)
-            .expect_err("LOD 1 must not exist");
+        let error =
+            convert_mesh(&mesh_with(triangle()), &options).expect_err("LOD 1 must not exist");
         assert!(matches!(
             error,
             SnError::InvalidData {
                 resource: "mesh LOD",
                 ..
+            }
+        ));
+    }
+
+    #[test]
+    fn enforces_aggregate_vertex_limit() {
+        let options = ConversionOptions {
+            limits: Limits {
+                max_vertices: 5,
+                ..Limits::default()
+            },
+            ..ConversionOptions::default()
+        };
+        let mut mesh = mesh_with(triangle());
+        mesh.lods[0].primitives.push(triangle());
+        let error = convert_mesh(&mesh, &options).expect_err("total vertices must exceed limit");
+        assert!(matches!(
+            error,
+            SnError::LimitExceeded {
+                resource: "vertices",
+                actual: 6,
+                limit: 5
+            }
+        ));
+    }
+
+    #[test]
+    fn enforces_aggregate_index_limit() {
+        let options = ConversionOptions {
+            limits: Limits {
+                max_indices: 5,
+                ..Limits::default()
+            },
+            ..ConversionOptions::default()
+        };
+        let mut mesh = mesh_with(triangle());
+        mesh.lods[0].primitives.push(triangle());
+        let error = convert_mesh(&mesh, &options).expect_err("total indices must exceed limit");
+        assert!(matches!(
+            error,
+            SnError::LimitExceeded {
+                resource: "indices",
+                actual: 6,
+                limit: 5
             }
         ));
     }

@@ -19,11 +19,8 @@ pub fn prepare_texture(
     validate_texture(texture, options)?;
 
     let base = &texture.mips[0];
-    let (width, height) = fit_dimensions(
-        texture.width,
-        texture.height,
-        options.max_texture_dimension,
-    );
+    let (width, height) =
+        fit_dimensions(texture.width, texture.height, options.max_texture_dimension);
     let rgba = resize_rgba(&base.data, texture.width, texture.height, width, height)?;
     let png_bytes = encode_png(&rgba, width, height)?;
 
@@ -79,11 +76,9 @@ fn validate_texture(texture: &TextureAsset, options: &ConversionOptions) -> Resu
             .ok_or(SnError::SizeOverflow {
                 resource: "texture dimensions",
             })?;
-        let expected_bytes = pixels
-            .checked_mul(4)
-            .ok_or(SnError::SizeOverflow {
-                resource: "texture byte length",
-            })?;
+        let expected_bytes = pixels.checked_mul(4).ok_or(SnError::SizeOverflow {
+            resource: "texture byte length",
+        })?;
         total_pixels = total_pixels
             .checked_add(pixels)
             .ok_or(SnError::SizeOverflow {
@@ -168,12 +163,13 @@ fn resize_rgba(
         for x in 0..width {
             let source_x = u64::from(x) * u64::from(source_width) / u64::from(width);
             let source_index = ((source_y * u64::from(source_width) + source_x) * 4) as usize;
-            let pixel = source
-                .get(source_index..source_index + 4)
-                .ok_or_else(|| SnError::InvalidData {
-                    resource: "texture data",
-                    reason: "resizing sampled outside the source buffer".to_owned(),
-                })?;
+            let pixel =
+                source
+                    .get(source_index..source_index + 4)
+                    .ok_or_else(|| SnError::InvalidData {
+                        resource: "texture data",
+                        reason: "resizing sampled outside the source buffer".to_owned(),
+                    })?;
             output.extend_from_slice(pixel);
         }
     }
@@ -219,8 +215,8 @@ mod tests {
 
     #[test]
     fn resizes_with_deterministic_nearest_sampling() {
-        let resized = resize_rgba(&texture().mips[0].data, 2, 2, 1, 1)
-            .expect("2x2 texture must resize");
+        let resized =
+            resize_rgba(&texture().mips[0].data, 2, 2, 1, 1).expect("2x2 texture must resize");
         assert_eq!(resized, [255, 0, 0, 255]);
     }
 

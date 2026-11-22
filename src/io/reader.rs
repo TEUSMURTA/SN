@@ -1,4 +1,4 @@
-use std::io::Read;
+use std::{fs::File, io::Read, path::Path};
 
 use crate::error::{Result, SnError};
 
@@ -26,6 +26,10 @@ impl<R: Read> AssetReader<R> {
 
     pub fn read_u8(&mut self) -> Result<u8> {
         Ok(self.read_array::<1>()?[0])
+    }
+
+    pub fn read_u16_le(&mut self) -> Result<u16> {
+        Ok(u16::from_le_bytes(self.read_array::<2>()?))
     }
 
     pub fn read_u32_le(&mut self) -> Result<u32> {
@@ -66,7 +70,7 @@ impl<R: Read> AssetReader<R> {
         Ok(bytes)
     }
 
-    fn read_array<const N: usize>(&mut self) -> Result<[u8; N]> {
+    pub(crate) fn read_array<const N: usize>(&mut self) -> Result<[u8; N]> {
         self.check_budget(N, "binary input")?;
         let mut bytes = [0; N];
         self.read_into(&mut bytes, "binary input")?;
@@ -89,12 +93,12 @@ impl<R: Read> AssetReader<R> {
         Ok(())
     }
 
-    fn read_into(&mut self, buffer: &mut [u8], resource: &'static str) -> Result<()> {
+    pub(crate) fn read_into(&mut self, buffer: &mut [u8], resource: &'static str) -> Result<()> {
         let requested = buffer.len();
         match self.inner.read_exact(buffer) {
             Ok(()) => {
-                let read = u64::try_from(requested)
-                    .map_err(|_| SnError::SizeOverflow { resource })?;
+                let read =
+                    u64::try_from(requested).map_err(|_| SnError::SizeOverflow { resource })?;
                 self.offset = self
                     .offset
                     .checked_add(read)
@@ -110,6 +114,34 @@ impl<R: Read> AssetReader<R> {
             Err(error) => Err(SnError::io("reading asset data", error)),
         }
     }
+}
+
+pub(crate) fn read_file_bounded(
+    path: &Path,
+    max_bytes: u64,
+    operation: &'static str,
+    resource: &'static str,
+) -> Result<Vec<u8>> {
+    let metadata = path
+        .metadata()
+        .map_err(|error| SnError::io(operation, error))?;
+    if !metadata.is_file() {
+        return Err(SnError::InvalidData {
+            resource,
+            reason: format!("{} is not a regular file", path.display()),
+        });
+    }
+    let len = metadata.len();
+    if len > max_bytes {
+        return Err(SnError::LimitExceeded {
+            resource,
+            actual: len,
+            limit: max_bytes,
+        });
+    }
+    let len = usize::try_from(len).map_err(|_| SnError::SizeOverflow { resource })?;
+    let file = File::open(path).map_err(|error| SnError::io(operation, error))?;
+    AssetReader::new(file, max_bytes).read_bytes(len, resource)
 }
 
 pub fn checked_byte_len(
@@ -168,7 +200,9 @@ mod tests {
             .expect_err("multiplication must overflow");
         assert!(matches!(
             error,
-            SnError::SizeOverflow { resource: "vertices" }
+            SnError::SizeOverflow {
+                resource: "vertices"
+            }
         ));
     }
 
