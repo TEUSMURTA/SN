@@ -930,8 +930,10 @@ pub fn write_prepared_glb<W: Write + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::TextureTarget;
     use crate::glb::validate_glb;
     use crate::model::{GpuTextureFormat, GpuTextureInfo, MeshLod, Primitive, VertexAttributes};
+    use crate::platform::switch;
 
     fn sample_prepared_asset() -> PreparedAsset {
         let png_1x1: Vec<u8> = vec![
@@ -1165,6 +1167,28 @@ mod tests {
         );
         assert_eq!(document.report.encoded_texture_bytes, ktx2_bytes.len());
         assert_eq!(document.report.gpu_texture_bytes, 4096);
+    }
+
+    #[test]
+    fn switch_png_export_omits_basisu_extension() {
+        let asset = sample_prepared_asset();
+        let options = switch::conversion_options();
+        assert_eq!(switch::TARGET_ID, "05EC0BBBE4BAE000");
+        assert_eq!(options.texture_target, TextureTarget::Png);
+
+        let document =
+            build_glb_document(&asset, &options.limits).expect("Switch PNG asset must export");
+        let json: Value = serde_json::from_slice(&document.json).expect("valid glTF JSON");
+        assert_eq!(json["images"][0]["mimeType"], "image/png");
+        assert_eq!(json["textures"][0]["source"], 0);
+        assert!(json["textures"][0].get("extensions").is_none());
+        for key in ["extensionsUsed", "extensionsRequired"] {
+            let values = json.get(key).and_then(Value::as_array);
+            assert!(
+                values.is_none_or(|list| !list.contains(&json!("KHR_texture_basisu"))),
+                "{key} must not list KHR_texture_basisu"
+            );
+        }
     }
 
     #[test]
