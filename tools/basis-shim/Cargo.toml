@@ -1,0 +1,16 @@
+[package]
+name = "basis-shim"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Front-end seguro para o encoder C++ basis-universal; única fronteira FFI do protótipo KTX2/Basis de PC"
+
+[dependencies]
+basis-universal = "0.3.1"
+thiserror = "2"
+
+[lints.rust]
+unsafe_code = "allow"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

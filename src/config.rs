@@ -46,12 +46,22 @@ pub enum TextureTarget {
     Ktx2Basis,
 }
 
+/// Compression mode for the PC-only KTX2/Basis prototype. Inert unless
+/// [`TextureTarget::Ktx2Basis`] is selected.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BasisMode {
+    Etc1s,
+    #[default]
+    Uastc,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConversionOptions {
     pub limits: Limits,
     pub lod: usize,
     pub max_texture_dimension: Option<u32>,
     pub texture_target: TextureTarget,
+    pub basis_mode: BasisMode,
     pub flip_v: bool,
 }
 
@@ -62,6 +72,7 @@ impl Default for ConversionOptions {
             lod: 0,
             max_texture_dimension: None,
             texture_target: TextureTarget::Png,
+            basis_mode: BasisMode::default(),
             flip_v: false,
         }
     }
