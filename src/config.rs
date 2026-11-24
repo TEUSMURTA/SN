@@ -1,4 +1,6 @@
 use crate::error::{Result, SnError};
+use crate::model::GpuTextureFormat;
+use crate::platform::Platform;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Limits {
@@ -60,6 +62,7 @@ pub struct ConversionOptions {
     pub limits: Limits,
     pub lod: usize,
     pub max_texture_dimension: Option<u32>,
+    pub platform: Platform,
     pub texture_target: TextureTarget,
     pub basis_mode: BasisMode,
     pub flip_v: bool,
@@ -71,6 +74,7 @@ impl Default for ConversionOptions {
             limits: Limits::default(),
             lod: 0,
             max_texture_dimension: None,
+            platform: Platform::default(),
             texture_target: TextureTarget::Png,
             basis_mode: BasisMode::default(),
             flip_v: false,
@@ -79,6 +83,15 @@ impl Default for ConversionOptions {
 }
 
 impl ConversionOptions {
+    /// Formato de GPU esperado para o [`TextureTarget`] atual neste perfil de plataforma.
+    #[must_use]
+    pub fn gpu_format(&self) -> GpuTextureFormat {
+        match self.platform {
+            Platform::Pc => crate::platform::pc::gpu_format(self.texture_target),
+            Platform::Switch => crate::platform::switch::gpu_format(self.texture_target),
+        }
+    }
+
     pub fn validate(&self) -> Result<()> {
         if self.max_texture_dimension == Some(0) {
             return Err(invalid_options(
@@ -150,6 +163,35 @@ mod tests {
         ConversionOptions::default()
             .validate()
             .expect("default options must be valid");
+    }
+
+    #[test]
+    fn default_platform_is_pc_and_maps_png_to_rgba8() {
+        let options = ConversionOptions::default();
+        assert_eq!(options.platform, Platform::Pc);
+        assert_eq!(options.gpu_format(), GpuTextureFormat::Rgba8);
+    }
+
+    #[test]
+    fn platform_selects_gpu_format_per_texture_target() {
+        let pc_ktx2 = ConversionOptions {
+            texture_target: TextureTarget::Ktx2Basis,
+            ..ConversionOptions::default()
+        };
+        assert_eq!(pc_ktx2.gpu_format(), GpuTextureFormat::Uastc);
+
+        let switch_ktx2 = ConversionOptions {
+            platform: Platform::Switch,
+            texture_target: TextureTarget::Ktx2Basis,
+            ..ConversionOptions::default()
+        };
+        assert_eq!(switch_ktx2.gpu_format(), GpuTextureFormat::Astc4x4);
+
+        let switch_png = ConversionOptions {
+            platform: Platform::Switch,
+            ..ConversionOptions::default()
+        };
+        assert_eq!(switch_png.gpu_format(), GpuTextureFormat::Rgba8);
     }
 
     #[test]

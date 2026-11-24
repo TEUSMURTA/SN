@@ -1169,6 +1169,118 @@ mod tests {
         assert_eq!(document.report.gpu_texture_bytes, 4096);
     }
 
+    #[cfg(feature = "pc-ktx2-basis")]
+    #[test]
+    fn exports_real_uastc_ktx2_from_the_pc_pipeline() {
+        use crate::config::BasisMode;
+        use crate::model::{Asset, MeshAsset, MipLevel, TextureAsset, TextureFormat};
+        use crate::platform::pc;
+
+        let source = Asset {
+            mesh: MeshAsset {
+                name: "ktx2_pipeline".to_owned(),
+                lods: vec![MeshLod {
+                    primitives: vec![Primitive {
+                        attributes: VertexAttributes {
+                            positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+                            ..VertexAttributes::default()
+                        },
+                        indices: vec![0, 1, 2],
+                        material: Some(0),
+                    }],
+                }],
+                skeleton: None,
+            },
+            textures: vec![TextureAsset {
+                name: "albedo_uastc".to_owned(),
+                width: 4,
+                height: 4,
+                format: TextureFormat::Rgba8,
+                color_space: ColorSpace::Srgb,
+                mips: vec![MipLevel {
+                    width: 4,
+                    height: 4,
+                    data: [255u8, 0, 0, 255].repeat(16),
+                }],
+            }],
+            materials: vec![Material {
+                name: "ktx2_material".to_owned(),
+                base_color_texture: Some(0),
+                ..Material::default()
+            }],
+        };
+        let options = pc::ktx2_conversion_options(BasisMode::Uastc);
+        let prepared =
+            crate::prepare_asset(&source, &options).expect("KTX2 pipeline must prepare the asset");
+        assert!(matches!(
+            prepared.textures[0].payload,
+            PreparedTexturePayload::Ktx2Basis(_)
+        ));
+        // PC + KTX2 -> UASTC: 4x4, 2x2 e 1x1 = 1 bloco de 16 bytes cada.
+        let gpu = prepared.textures[0]
+            .gpu
+            .expect("PC KTX2 must declare its UASTC GPU footprint");
+        assert_eq!(gpu.format, GpuTextureFormat::Uastc);
+        assert_eq!(gpu.mip_count, 3);
+        assert_eq!(gpu.byte_len, 48);
+        let payload_len = prepared.textures[0].payload.encoded_len();
+
+        let document =
+            build_glb_document(&prepared, &Limits::default()).expect("KTX2 asset must export");
+        assert_eq!(document.report.encoded_texture_bytes, payload_len);
+        assert_eq!(document.report.gpu_texture_bytes, 48);
+
+        let json: Value = serde_json::from_slice(&document.json).expect("valid glTF JSON");
+        assert_eq!(json["images"][0]["mimeType"], "image/ktx2");
+        assert!(json["textures"][0].get("source").is_none());
+        assert_eq!(
+            json["textures"][0]["extensions"]["KHR_texture_basisu"]["source"],
+            0
+        );
+        assert_eq!(json["extensionsUsed"], json!(["KHR_texture_basisu"]));
+        assert_eq!(json["extensionsRequired"], json!(["KHR_texture_basisu"]));
+
+        let view_index = usize::try_from(
+            json["images"][0]["bufferView"]
+                .as_u64()
+                .expect("bufferView index must be an integer"),
+        )
+        .expect("bufferView index must fit usize");
+        let offset = usize::try_from(
+            json["bufferViews"][view_index]["byteOffset"]
+                .as_u64()
+                .expect("byteOffset must be an integer"),
+        )
+        .expect("byteOffset must fit usize");
+        let length = usize::try_from(
+            json["bufferViews"][view_index]["byteLength"]
+                .as_u64()
+                .expect("byteLength must be an integer"),
+        )
+        .expect("byteLength must fit usize");
+        assert_eq!(length, payload_len);
+        let payload = &document.binary[offset..offset + length];
+
+        let reader = ktx2::Reader::new(payload).expect("independent parser must accept the KTX2");
+        assert_eq!(reader.header().pixel_width, 4);
+        assert_eq!(reader.header().pixel_height, 4);
+        assert_eq!(reader.header().level_count, 3);
+        assert!(reader.header().format.is_none());
+        assert!(reader.header().supercompression_scheme.is_none());
+        assert_eq!(reader.color_model(), Some(ktx2::ColorModel::UASTC));
+        assert_eq!(
+            reader.transfer_function(),
+            Some(ktx2::TransferFunction::SRGB)
+        );
+        let levels: Vec<_> = reader.levels().collect();
+        assert_eq!(levels.len(), 3);
+        for level in &levels {
+            assert!(!level.data.is_empty());
+            assert_eq!(level.data.len() % 16, 0);
+            assert_eq!(level.uncompressed_byte_length, level.data.len() as u64);
+        }
+    }
+
     #[test]
     fn switch_png_export_omits_basisu_extension() {
         let asset = sample_prepared_asset();

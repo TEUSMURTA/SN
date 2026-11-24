@@ -66,6 +66,11 @@ fn exports_mesh_and_png_as_a_gltf_document() {
         }],
     };
     let texture_bytes = prepared.textures[0].payload.encoded_len();
+    // PNG 1x1 -> RGBA8 na GPU: cadeia completa com um único nível de 4 bytes.
+    let gpu = prepared.textures[0]
+        .gpu
+        .expect("PNG must declare its GPU footprint");
+    assert_eq!((gpu.mip_count, gpu.byte_len), (1, 4));
     let mut output = Vec::new();
     let report = write_prepared_glb(&mut output, &prepared, &options.limits)
         .expect("prepared asset must export");
@@ -75,7 +80,7 @@ fn exports_mesh_and_png_as_a_gltf_document() {
     assert_eq!(report.index_count, 3);
     assert_eq!(report.texture_count, 1);
     assert_eq!(report.encoded_texture_bytes, texture_bytes);
-    assert_eq!(report.gpu_texture_bytes, 0);
+    assert_eq!(report.gpu_texture_bytes, 4);
     assert_eq!(report.glb_bytes, output.len());
 
     let document = gltf::Gltf::from_slice(&output).expect("gltf crate must validate the document");

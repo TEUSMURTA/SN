@@ -13,14 +13,13 @@ png = "0.17"
 serde_json = "1"
 thiserror = "2"
 basis-shim = { path = "tools/basis-shim", optional = true }
-sysinfo = { version = "0.40", optional = true }
 
 [dev-dependencies]
 gltf = { version = "1.4", default-features = false }
 ktx2 = "0.5"
 
 [features]
-pc-ktx2-basis = ["dep:basis-shim", "dep:sysinfo"]
+pc-ktx2-basis = ["dep:basis-shim"]
 
 [lints.rust]
 unsafe_code = "forbid"

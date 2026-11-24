@@ -10,7 +10,10 @@ use scarlet_nexus_assets::{
     config::ConversionOptions,
     glb::{validate_glb, write_prepared_glb},
     io::ue_texture::read_umodel_texture,
-    model::{Asset, ColorSpace, Material, MeshAsset, MeshLod, Primitive, VertexAttributes},
+    model::{
+        Asset, ColorSpace, ConversionReport, Material, MeshAsset, MeshLod, Primitive,
+        VertexAttributes,
+    },
     platform::{self, SWITCH_TARGET_ID},
     prepare_asset,
 };
@@ -45,21 +48,53 @@ fn main() -> Result<(), Box<dyn Error>> {
     let output_directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/real_asset_profiles");
     fs::create_dir_all(&output_directory)?;
 
-    export_profile(
+    let pc_report = export_profile(
         "PC",
         "rubble_concrete_pc.glb",
         &asset,
         platform::pc::conversion_options(),
         &output_directory,
     )?;
-    export_profile(
+    let switch_report = export_profile(
         &format!("Switch ({SWITCH_TARGET_ID})"),
         "rubble_concrete_switch.glb",
         &asset,
         platform::switch::conversion_options(),
         &output_directory,
     )?;
+    print_vram_reduction(
+        "Switch vs PC (PNG)",
+        pc_report.gpu_texture_bytes,
+        switch_report.gpu_texture_bytes,
+    );
+    #[cfg(feature = "pc-ktx2-basis")]
+    {
+        let ktx2_report = export_profile(
+            "PC (KTX2 UASTC)",
+            "rubble_concrete_pc_ktx2.glb",
+            &asset,
+            platform::pc::ktx2_conversion_options(scarlet_nexus_assets::config::BasisMode::Uastc),
+            &output_directory,
+        )?;
+        print_vram_reduction(
+            "PC KTX2 UASTC vs PC PNG",
+            pc_report.gpu_texture_bytes,
+            ktx2_report.gpu_texture_bytes,
+        );
+    }
     Ok(())
+}
+
+fn print_vram_reduction(label: &str, before: u64, after: u64) {
+    if before == 0 {
+        println!("{label}: footprint de GPU indisponível para comparação (0 bytes antes)");
+        return;
+    }
+    let saved = before.saturating_sub(after);
+    let percent = saved as f64 * 100.0 / before as f64;
+    println!(
+        "{label}: VRAM de texturas {before} -> {after} bytes (redução de {percent:.1}%, -{saved} bytes)"
+    );
 }
 
 fn load_real_asset(mesh_path: &Path, texture_path: &Path) -> Result<Asset, Box<dyn Error>> {
@@ -306,7 +341,7 @@ fn export_profile(
     asset: &Asset,
     options: ConversionOptions,
     output_directory: &Path,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<ConversionReport, Box<dyn Error>> {
     let prepared = prepare_asset(asset, &options)?;
     let output_path = output_directory.join(file_name);
     let report = {
@@ -315,6 +350,16 @@ fn export_profile(
     };
     let glb = fs::read(&output_path)?;
     validate_glb(&glb, options.limits.max_asset_bytes)?;
-    println!("{label}\n{report:#?}\nGLB: {}", output_path.display());
-    Ok(())
+    if report.gpu_texture_bytes == 0 {
+        return Err(invalid_data(format!(
+            "{label} must declare a positive GPU texture footprint"
+        ))
+        .into());
+    }
+    println!(
+        "{label}\n{report:#?}\nGLB: {}\nVRAM de texturas: {} bytes",
+        output_path.display(),
+        report.gpu_texture_bytes
+    );
+    Ok(report)
 }

@@ -2,7 +2,7 @@ use crate::{
     config::{ConversionOptions, Limits},
     convert::{
         mesh::{convert_mesh, selected_lod},
-        texture::{ensure_supported_target, prepare_validated_texture, validate_texture},
+        texture::{ensure_supported_target, prepare_dispatched_texture, prevalidate_texture},
     },
     error::{Result, SnError},
     model::{Asset, MeshLod, PreparedAsset, PreparedTexture},
@@ -109,7 +109,7 @@ pub fn prepare_asset(asset: &Asset, options: &ConversionOptions) -> Result<Prepa
 
     // Validate every source and reject the aggregate RGBA budget before encoding.
     for texture in &asset.textures {
-        usage.add_rgba(validate_texture(texture, options)?, &options.limits)?;
+        usage.add_rgba(prevalidate_texture(texture, options)?, &options.limits)?;
     }
 
     let mesh = convert_mesh(&asset.mesh, options)?;
@@ -120,7 +120,7 @@ pub fn prepare_asset(asset: &Asset, options: &ConversionOptions) -> Result<Prepa
             resource: "prepared textures",
         })?;
     for texture in &asset.textures {
-        let prepared = prepare_validated_texture(texture, options)?;
+        let prepared = prepare_dispatched_texture(texture, options)?;
         usage.add_prepared_texture(&prepared, &options.limits)?;
         textures.push(prepared);
     }
