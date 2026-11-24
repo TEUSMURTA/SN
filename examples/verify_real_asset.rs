@@ -82,6 +82,26 @@ fn main() -> Result<(), Box<dyn Error>> {
             ktx2_report.gpu_texture_bytes,
         );
     }
+    #[cfg(feature = "switch-ktx2-astc")]
+    {
+        let astc_report = export_profile(
+            &format!("Switch KTX2 ASTC 4x4 ({SWITCH_TARGET_ID})"),
+            "rubble_concrete_switch_ktx2_astc.glb",
+            &asset,
+            platform::switch::ktx2_astc_conversion_options(),
+            &output_directory,
+        )?;
+        print_vram_reduction(
+            "Switch KTX2 ASTC 4x4 vs Switch PNG",
+            switch_report.gpu_texture_bytes,
+            astc_report.gpu_texture_bytes,
+        );
+        print_vram_reduction(
+            "Switch KTX2 ASTC 4x4 vs PC PNG",
+            pc_report.gpu_texture_bytes,
+            astc_report.gpu_texture_bytes,
+        );
+    }
     Ok(())
 }
 

@@ -114,14 +114,18 @@ pub struct PreparedAsset {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PreparedTexturePayload {
     Png(Vec<u8>),
+    /// KTX2 supercompresso Basis (UASTC/ETC1S) — embarcado via `KHR_texture_basisu`.
     Ktx2Basis(Vec<u8>),
+    /// KTX2 ASTC 4x4 nativo (vkFormat preenchido, sem supercompressão) — embarcado
+    /// como `image/ktx2` comum, sem `KHR_texture_basisu`.
+    Ktx2Astc(Vec<u8>),
 }
 
 impl PreparedTexturePayload {
     #[must_use]
     pub fn encoded_bytes(&self) -> &[u8] {
         match self {
-            Self::Png(bytes) | Self::Ktx2Basis(bytes) => bytes,
+            Self::Png(bytes) | Self::Ktx2Basis(bytes) | Self::Ktx2Astc(bytes) => bytes,
         }
     }
 

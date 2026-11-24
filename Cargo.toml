@@ -20,6 +20,7 @@ ktx2 = "0.5"
 
 [features]
 pc-ktx2-basis = ["dep:basis-shim"]
+switch-ktx2-astc = ["dep:basis-shim"]
 
 [lints.rust]
 unsafe_code = "forbid"

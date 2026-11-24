@@ -18,11 +18,11 @@ pub fn prepare_texture(
 
 pub(crate) fn ensure_supported_target(options: &ConversionOptions) -> Result<()> {
     if options.texture_target == TextureTarget::Ktx2Basis {
-        #[cfg(feature = "pc-ktx2-basis")]
+        #[cfg(any(feature = "pc-ktx2-basis", feature = "switch-ktx2-astc"))]
         return Ok(());
-        #[cfg(not(feature = "pc-ktx2-basis"))]
+        #[cfg(not(any(feature = "pc-ktx2-basis", feature = "switch-ktx2-astc")))]
         return Err(SnError::Unsupported(
-            "KTX2/Basis encoding requires the pc-ktx2-basis feature; use the portable PNG profile"
+            "KTX2 encoding requires the pc-ktx2-basis (PC/UASTC) or switch-ktx2-astc (Switch/ASTC) feature; use the portable PNG profile"
                 .to_owned(),
         ));
     }
@@ -35,19 +35,21 @@ pub(crate) fn prevalidate_texture(
     texture: &TextureAsset,
     options: &ConversionOptions,
 ) -> Result<u64> {
-    #[cfg(feature = "pc-ktx2-basis")]
+    #[cfg(any(feature = "pc-ktx2-basis", feature = "switch-ktx2-astc"))]
     if options.texture_target == TextureTarget::Ktx2Basis {
         return crate::convert::ktx2::validate_ktx2_texture(texture, options);
     }
     validate_texture(texture, options)
 }
 
-/// Despacho de encoding por alvo; pressupõe `prevalidate_texture` aprovado.
+/// Despacho de encoding por alvo; presupõe `prevalidate_texture` aprovado.
+/// O alvo KTX2 despacha por plataforma dentro de `ktx2::prepare_ktx2_texture`
+/// (PC→UASTC com `pc-ktx2-basis`, Switch→ASTC 4x4 com `switch-ktx2-astc`).
 pub(crate) fn prepare_dispatched_texture(
     texture: &TextureAsset,
     options: &ConversionOptions,
 ) -> Result<PreparedTexture> {
-    #[cfg(feature = "pc-ktx2-basis")]
+    #[cfg(any(feature = "pc-ktx2-basis", feature = "switch-ktx2-astc"))]
     if options.texture_target == TextureTarget::Ktx2Basis {
         return crate::convert::ktx2::prepare_ktx2_texture(texture, options);
     }
@@ -350,7 +352,7 @@ mod tests {
         ));
     }
 
-    #[cfg(not(feature = "pc-ktx2-basis"))]
+    #[cfg(not(any(feature = "pc-ktx2-basis", feature = "switch-ktx2-astc")))]
     #[test]
     fn rejects_unimplemented_ktx2_instead_of_emitting_png() {
         let options = ConversionOptions {
