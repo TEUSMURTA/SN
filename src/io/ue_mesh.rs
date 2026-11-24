@@ -26,7 +26,7 @@ pub fn read_umodel_mesh(path: impl AsRef<Path>, limits: &Limits) -> Result<MeshA
     }
     let bytes = read_file_bounded(
         path,
-        limits.max_asset_bytes,
+        limits.max_input_bytes,
         "reading UModel mesh",
         "PSK mesh",
     )?;
@@ -42,15 +42,15 @@ pub fn parse_psk(name: &str, input: &[u8], limits: &Limits) -> Result<MeshAsset>
     let input_len = u64::try_from(input.len()).map_err(|_| SnError::SizeOverflow {
         resource: "PSK mesh",
     })?;
-    if input_len > limits.max_asset_bytes {
+    if input_len > limits.max_input_bytes {
         return Err(SnError::LimitExceeded {
             resource: "PSK mesh",
             actual: input_len,
-            limit: limits.max_asset_bytes,
+            limit: limits.max_input_bytes,
         });
     }
 
-    let mut reader = AssetReader::new(input, limits.max_asset_bytes);
+    let mut reader = AssetReader::new(input, limits.max_input_bytes);
     let mut chunks = Chunks::default();
     let mut saw_header = false;
     while reader.offset() < input_len {
@@ -587,7 +587,7 @@ mod tests {
     #[test]
     fn rejects_input_beyond_asset_budget() {
         let limits = Limits {
-            max_asset_bytes: 4,
+            max_input_bytes: 4,
             ..Limits::default()
         };
         let error =

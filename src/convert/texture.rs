@@ -1,9 +1,9 @@
-use std::io::Cursor;
+use std::{borrow::Cow, io::Cursor};
 
 use crate::{
     config::{ConversionOptions, TextureTarget},
     error::{Result, SnError},
-    model::{PreparedTexture, TextureAsset, TextureFormat},
+    model::{GpuTextureInfo, PreparedTexture, PreparedTexturePayload, TextureAsset, TextureFormat},
 };
 
 pub fn prepare_texture(
@@ -11,29 +11,72 @@ pub fn prepare_texture(
     options: &ConversionOptions,
 ) -> Result<PreparedTexture> {
     options.validate()?;
+    ensure_supported_target(options)?;
+    prevalidate_texture(texture, options)?;
+    prepare_dispatched_texture(texture, options)
+}
+
+pub(crate) fn ensure_supported_target(options: &ConversionOptions) -> Result<()> {
     if options.texture_target == TextureTarget::Ktx2Basis {
+        #[cfg(feature = "pc-ktx2-basis")]
+        return Ok(());
+        #[cfg(not(feature = "pc-ktx2-basis"))]
         return Err(SnError::Unsupported(
-            "KTX2/Basis encoding is not implemented; use the portable PNG profile".to_owned(),
+            "KTX2/Basis encoding requires the pc-ktx2-basis feature; use the portable PNG profile"
+                .to_owned(),
         ));
     }
-    validate_texture(texture, options)?;
+    Ok(())
+}
 
+/// Validação prévia por textura, antes de qualquer alocação/encoding: no
+/// protótipo KTX2 os orçamentos incluem a cauda de mips gerada.
+pub(crate) fn prevalidate_texture(
+    texture: &TextureAsset,
+    options: &ConversionOptions,
+) -> Result<u64> {
+    #[cfg(feature = "pc-ktx2-basis")]
+    if options.texture_target == TextureTarget::Ktx2Basis {
+        return crate::convert::ktx2::validate_ktx2_texture(texture, options);
+    }
+    validate_texture(texture, options)
+}
+
+/// Despacho de encoding por alvo; pressupõe `prevalidate_texture` aprovado.
+pub(crate) fn prepare_dispatched_texture(
+    texture: &TextureAsset,
+    options: &ConversionOptions,
+) -> Result<PreparedTexture> {
+    #[cfg(feature = "pc-ktx2-basis")]
+    if options.texture_target == TextureTarget::Ktx2Basis {
+        return crate::convert::ktx2::prepare_ktx2_texture(texture, options);
+    }
+    prepare_validated_texture(texture, options)
+}
+
+pub(crate) fn prepare_validated_texture(
+    texture: &TextureAsset,
+    options: &ConversionOptions,
+) -> Result<PreparedTexture> {
     let base = &texture.mips[0];
     let (width, height) =
         fit_dimensions(texture.width, texture.height, options.max_texture_dimension);
     let rgba = resize_rgba(&base.data, texture.width, texture.height, width, height)?;
-    let png_bytes = encode_png(&rgba, width, height)?;
+    let png_bytes = encode_png(rgba.as_ref(), width, height)?;
+    // PNG é decodificado para RGBA8 na GPU: cadeia mip completa até 1x1 nas dimensões de saída.
+    let gpu = GpuTextureInfo::full_chain(options.gpu_format(), width, height)?;
 
     Ok(PreparedTexture {
         name: texture.name.clone(),
         width,
         height,
         color_space: texture.color_space,
-        png_bytes,
+        payload: PreparedTexturePayload::Png(png_bytes),
+        gpu: Some(gpu),
     })
 }
 
-fn validate_texture(texture: &TextureAsset, options: &ConversionOptions) -> Result<()> {
+pub(crate) fn validate_texture(texture: &TextureAsset, options: &ConversionOptions) -> Result<u64> {
     if texture.width == 0 || texture.height == 0 {
         return Err(SnError::InvalidData {
             resource: "texture dimensions",
@@ -96,11 +139,11 @@ fn validate_texture(texture: &TextureAsset, options: &ConversionOptions) -> Resu
                 limit: options.limits.max_texture_pixels,
             });
         }
-        if total_bytes > options.limits.max_texture_bytes {
+        if total_bytes > options.limits.max_texture_rgba_bytes {
             return Err(SnError::LimitExceeded {
-                resource: "texture bytes",
+                resource: "texture RGBA bytes",
                 actual: total_bytes,
-                limit: options.limits.max_texture_bytes,
+                limit: options.limits.max_texture_rgba_bytes,
             });
         }
         if mip.data.len() as u64 != expected_bytes {
@@ -115,10 +158,10 @@ fn validate_texture(texture: &TextureAsset, options: &ConversionOptions) -> Resu
         previous_width = mip.width;
         previous_height = mip.height;
     }
-    Ok(())
+    Ok(total_bytes)
 }
 
-fn fit_dimensions(width: u32, height: u32, maximum: Option<u32>) -> (u32, u32) {
+pub(crate) fn fit_dimensions(width: u32, height: u32, maximum: Option<u32>) -> (u32, u32) {
     let Some(maximum) = maximum else {
         return (width, height);
     };
@@ -135,15 +178,16 @@ fn fit_dimensions(width: u32, height: u32, maximum: Option<u32>) -> (u32, u32) {
 }
 
 /// Nearest-neighbor resizing avoids mixing sRGB and linear channels or normal-map directions.
-fn resize_rgba(
-    source: &[u8],
+/// Returns the source slice unchanged when no resize is needed.
+pub(crate) fn resize_rgba<'a>(
+    source: &'a [u8],
     source_width: u32,
     source_height: u32,
     width: u32,
     height: u32,
-) -> Result<Vec<u8>> {
+) -> Result<Cow<'a, [u8]>> {
     if source_width == width && source_height == height {
-        return Ok(source.to_vec());
+        return Ok(Cow::Borrowed(source));
     }
     let output_len = u64::from(width)
         .checked_mul(u64::from(height))
@@ -173,7 +217,7 @@ fn resize_rgba(
             output.extend_from_slice(pixel);
         }
     }
-    Ok(output)
+    Ok(Cow::Owned(output))
 }
 
 fn encode_png(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>> {
@@ -191,7 +235,7 @@ fn encode_png(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{ColorSpace, MipLevel};
+    use crate::model::{ColorSpace, GpuTextureFormat, MipLevel};
 
     fn texture() -> TextureAsset {
         TextureAsset {
@@ -214,10 +258,24 @@ mod tests {
     }
 
     #[test]
+    fn borrows_source_rgba_and_encodes_png_without_resize() {
+        let texture = texture();
+        let source = texture.mips[0].data.as_slice();
+        let rgba = resize_rgba(source, 2, 2, 2, 2).expect("matching dimensions must not resize");
+
+        assert!(matches!(&rgba, Cow::Borrowed(_)));
+        assert_eq!(rgba.as_ptr(), source.as_ptr());
+        let png = encode_png(rgba.as_ref(), 2, 2).expect("borrowed RGBA must encode");
+        assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
+    }
+
+    #[test]
     fn resizes_with_deterministic_nearest_sampling() {
+        let texture = texture();
         let resized =
-            resize_rgba(&texture().mips[0].data, 2, 2, 1, 1).expect("2x2 texture must resize");
-        assert_eq!(resized, [255, 0, 0, 255]);
+            resize_rgba(&texture.mips[0].data, 2, 2, 1, 1).expect("2x2 texture must resize");
+        assert!(matches!(&resized, Cow::Owned(_)));
+        assert_eq!(resized.as_ref(), [255, 0, 0, 255]);
     }
 
     #[test]
@@ -228,7 +286,33 @@ mod tests {
         };
         let prepared = prepare_texture(&texture(), &options).expect("texture must encode");
         assert_eq!((prepared.width, prepared.height), (1, 1));
-        assert!(prepared.png_bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
+        assert!(matches!(prepared.payload, PreparedTexturePayload::Png(_)));
+        assert!(
+            prepared
+                .payload
+                .encoded_bytes()
+                .starts_with(b"\x89PNG\r\n\x1a\n")
+        );
+        assert_eq!(
+            prepared.payload.encoded_len(),
+            prepared.payload.encoded_bytes().len()
+        );
+        // Saída 1x1: cadeia completa com um único nível de 4 bytes.
+        let gpu = prepared.gpu.expect("PNG must declare its GPU footprint");
+        assert_eq!(gpu.format, GpuTextureFormat::Rgba8);
+        assert_eq!((gpu.mip_count, gpu.byte_len), (1, 4));
+    }
+
+    #[test]
+    fn png_declares_full_mip_chain_at_output_dimensions() {
+        let prepared = prepare_texture(&texture(), &ConversionOptions::default())
+            .expect("texture must encode");
+        assert_eq!((prepared.width, prepared.height), (2, 2));
+        let gpu = prepared.gpu.expect("PNG must declare its GPU footprint");
+        assert_eq!(gpu.format, GpuTextureFormat::Rgba8);
+        // 2x2 + 1x1 pixels * 4 bytes por pixel.
+        assert_eq!(gpu.mip_count, 2);
+        assert_eq!(gpu.byte_len, (4 + 1) * 4);
     }
 
     #[test]
@@ -266,6 +350,7 @@ mod tests {
         ));
     }
 
+    #[cfg(not(feature = "pc-ktx2-basis"))]
     #[test]
     fn rejects_unimplemented_ktx2_instead_of_emitting_png() {
         let options = ConversionOptions {

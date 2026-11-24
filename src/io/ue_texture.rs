@@ -24,7 +24,7 @@ pub fn read_umodel_texture(
     }
     let bytes = read_file_bounded(
         path,
-        limits.max_asset_bytes,
+        limits.max_input_bytes,
         "reading UModel texture",
         "TGA texture",
     )?;
@@ -45,15 +45,15 @@ pub fn parse_tga(
     let input_len = u64::try_from(input.len()).map_err(|_| SnError::SizeOverflow {
         resource: "TGA texture",
     })?;
-    if input_len > limits.max_asset_bytes {
+    if input_len > limits.max_input_bytes {
         return Err(SnError::LimitExceeded {
             resource: "TGA texture",
             actual: input_len,
-            limit: limits.max_asset_bytes,
+            limit: limits.max_input_bytes,
         });
     }
 
-    let mut reader = AssetReader::new(input, limits.max_asset_bytes);
+    let mut reader = AssetReader::new(input, limits.max_input_bytes);
     let header = reader.read_array::<18>()?;
     if header[1] != 0 {
         return Err(SnError::Unsupported(
@@ -107,7 +107,7 @@ pub fn parse_tga(
             u64::try_from(format.bytes_per_pixel()).map_err(|_| SnError::SizeOverflow {
                 resource: "TGA pixel data",
             })?,
-            limits.max_asset_bytes,
+            limits.max_input_bytes,
             "TGA pixel data",
         )?;
         let source = reader.read_bytes(source_len, "TGA pixel data")?;
@@ -190,11 +190,11 @@ fn checked_rgba_len(width: u32, height: u32, limits: &Limits) -> Result<usize> {
     let bytes = pixels.checked_mul(4).ok_or(SnError::SizeOverflow {
         resource: "decoded TGA pixels",
     })?;
-    if bytes > limits.max_texture_bytes {
+    if bytes > limits.max_texture_rgba_bytes {
         return Err(SnError::LimitExceeded {
-            resource: "texture bytes",
+            resource: "texture RGBA bytes",
             actual: bytes,
-            limit: limits.max_texture_bytes,
+            limit: limits.max_texture_rgba_bytes,
         });
     }
     usize::try_from(bytes).map_err(|_| SnError::SizeOverflow {
@@ -386,7 +386,7 @@ mod tests {
     fn detects_decoded_size_overflow() {
         let limits = Limits {
             max_texture_pixels: u64::MAX,
-            max_texture_bytes: u64::MAX,
+            max_texture_rgba_bytes: u64::MAX,
             ..Limits::default()
         };
         let error = checked_rgba_len(u32::MAX, u32::MAX, &limits)
