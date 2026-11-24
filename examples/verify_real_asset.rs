@@ -11,8 +11,9 @@ use scarlet_nexus_assets::{
     glb::{validate_glb, write_prepared_glb},
     io::ue_texture::read_umodel_texture,
     model::{
-        Asset, ColorSpace, ConversionReport, Material, MeshAsset, MeshLod, Primitive,
-        VertexAttributes,
+        Asset, ColorSpace, ConversionReport, GpuTextureFormat, Material, MeshAsset, MeshLod,
+        MipLevel, Primitive, TextureAsset, TextureFormat, VertexAttributes, full_mip_count,
+        mip_chain_bytes,
     },
     platform::{self, SWITCH_TARGET_ID},
     prepare_asset,
@@ -48,14 +49,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     let output_directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/real_asset_profiles");
     fs::create_dir_all(&output_directory)?;
 
-    let pc_report = export_profile(
+    let pc = export_profile(
         "PC",
         "rubble_concrete_pc.glb",
         &asset,
         platform::pc::conversion_options(),
         &output_directory,
     )?;
-    let switch_report = export_profile(
+    let switch = export_profile(
         &format!("Switch ({SWITCH_TARGET_ID})"),
         "rubble_concrete_switch.glb",
         &asset,
@@ -64,12 +65,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     )?;
     print_vram_reduction(
         "Switch vs PC (PNG)",
-        pc_report.gpu_texture_bytes,
-        switch_report.gpu_texture_bytes,
+        pc.report.gpu_texture_bytes,
+        switch.report.gpu_texture_bytes,
     );
     #[cfg(feature = "pc-ktx2-basis")]
     {
-        let ktx2_report = export_profile(
+        let ktx2 = export_profile(
             "PC (KTX2 UASTC)",
             "rubble_concrete_pc_ktx2.glb",
             &asset,
@@ -78,10 +79,31 @@ fn main() -> Result<(), Box<dyn Error>> {
         )?;
         print_vram_reduction(
             "PC KTX2 UASTC vs PC PNG",
-            pc_report.gpu_texture_bytes,
-            ktx2_report.gpu_texture_bytes,
+            pc.report.gpu_texture_bytes,
+            ktx2.report.gpu_texture_bytes,
         );
     }
+    #[cfg(feature = "switch-ktx2-astc")]
+    {
+        let astc = export_profile(
+            &format!("Switch KTX2 ASTC 4x4 ({SWITCH_TARGET_ID})"),
+            "rubble_concrete_switch_ktx2_astc.glb",
+            &asset,
+            platform::switch::ktx2_astc_conversion_options(),
+            &output_directory,
+        )?;
+        print_vram_reduction(
+            "Switch KTX2 ASTC 4x4 vs Switch PNG",
+            switch.report.gpu_texture_bytes,
+            astc.report.gpu_texture_bytes,
+        );
+        print_vram_reduction(
+            "Switch KTX2 ASTC 4x4 vs PC PNG",
+            pc.report.gpu_texture_bytes,
+            astc.report.gpu_texture_bytes,
+        );
+    }
+    benchmark_texture_sizes(&asset, &output_directory)?;
     Ok(())
 }
 
@@ -335,14 +357,72 @@ fn unreal_position_from_gltf(position: [f32; 3]) -> [f32; 3] {
     [position[2], -position[0], position[1]]
 }
 
+struct TextureFootprint {
+    name: String,
+    source_width: u32,
+    source_height: u32,
+    width: u32,
+    height: u32,
+    format: GpuTextureFormat,
+    mip_count: u32,
+    byte_len: u64,
+    encoded_bytes: usize,
+}
+
+struct ProfileOutput {
+    report: ConversionReport,
+    textures: Vec<TextureFootprint>,
+}
+
 fn export_profile(
     label: &str,
     file_name: &str,
     asset: &Asset,
     options: ConversionOptions,
     output_directory: &Path,
-) -> Result<ConversionReport, Box<dyn Error>> {
+) -> Result<ProfileOutput, Box<dyn Error>> {
     let prepared = prepare_asset(asset, &options)?;
+    let mut textures = Vec::new();
+    for (source, prepared_texture) in asset.textures.iter().zip(&prepared.textures) {
+        let gpu = prepared_texture.gpu.ok_or_else(|| {
+            invalid_data(format!(
+                "{label}: texture '{}' must declare a GPU footprint",
+                prepared_texture.name
+            ))
+        })?;
+        let expected_mips = full_mip_count(prepared_texture.width, prepared_texture.height)?;
+        if gpu.mip_count != expected_mips {
+            return Err(invalid_data(format!(
+                "{label}: texture '{}' declares {} mips, expected the full chain of {expected_mips}",
+                prepared_texture.name, gpu.mip_count
+            ))
+            .into());
+        }
+        let expected_bytes = mip_chain_bytes(
+            gpu.format,
+            prepared_texture.width,
+            prepared_texture.height,
+            gpu.mip_count,
+        )?;
+        if gpu.byte_len != expected_bytes {
+            return Err(invalid_data(format!(
+                "{label}: texture '{}' declares {} GPU bytes, expected {expected_bytes}",
+                prepared_texture.name, gpu.byte_len
+            ))
+            .into());
+        }
+        textures.push(TextureFootprint {
+            name: prepared_texture.name.clone(),
+            source_width: source.width,
+            source_height: source.height,
+            width: prepared_texture.width,
+            height: prepared_texture.height,
+            format: gpu.format,
+            mip_count: gpu.mip_count,
+            byte_len: gpu.byte_len,
+            encoded_bytes: prepared_texture.payload.encoded_len(),
+        });
+    }
     let output_path = output_directory.join(file_name);
     let report = {
         let mut output = fs::File::create(&output_path)?;
@@ -361,5 +441,267 @@ fn export_profile(
         output_path.display(),
         report.gpu_texture_bytes
     );
-    Ok(report)
+    for texture in &textures {
+        println!(
+            "  textura '{}': {}x{} -> {}x{}, {} mips, GPU {:?} com {} bytes, {} bytes codificados",
+            texture.name,
+            texture.source_width,
+            texture.source_height,
+            texture.width,
+            texture.height,
+            texture.mip_count,
+            texture.format,
+            texture.byte_len,
+            texture.encoded_bytes
+        );
+    }
+    Ok(ProfileOutput { report, textures })
+}
+
+const SIZE_1024_TEXTURE: &str = "tests/fixtures/ref_umodel/Game/Character/om/om0427/99_Resource/\
+                                 T_om0427_ALB.tga";
+const SIZE_2048_TEXTURE: &str =
+    "tests/fixtures/ref_umodel/Game/Environment/Sky/Sky01/T_Sky_Blue2.tga";
+
+/// Compara os 4 perfis (PC PNG, PC KTX2 UASTC, Switch PNG, Switch KTX2 ASTC 4x4)
+/// sobre texturas reais de 1024x1024 e 2048x2048; na ausência do fixture, gera
+/// casos determinísticos com as mesmas dimensões.
+fn benchmark_texture_sizes(
+    base_asset: &Asset,
+    output_directory: &Path,
+) -> Result<(), Box<dyn Error>> {
+    let cases = [
+        ("1024x1024", SIZE_1024_TEXTURE, 1024_u32),
+        ("2048x2048", SIZE_2048_TEXTURE, 2048_u32),
+    ];
+    for (label, relative, fallback_dimension) in cases {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(relative);
+        let texture = if path.is_file() {
+            println!("\nCaso {label}: textura real {}", path.display());
+            read_umodel_texture(
+                &path,
+                ColorSpace::Srgb,
+                &ConversionOptions::default().limits,
+            )?
+        } else {
+            println!(
+                "\nCaso {label}: fixture ausente ({relative}); textura determinística {fallback_dimension}x{fallback_dimension}"
+            );
+            synthetic_texture(
+                &format!("synthetic_{fallback_dimension}x{fallback_dimension}"),
+                fallback_dimension,
+                fallback_dimension,
+            )?
+        };
+        let mut asset = base_asset.clone();
+        asset.textures = vec![texture];
+        benchmark_profiles(label, &asset, output_directory)?;
+    }
+    Ok(())
+}
+
+fn benchmark_profiles(
+    label: &str,
+    asset: &Asset,
+    output_directory: &Path,
+) -> Result<(), Box<dyn Error>> {
+    let source = asset
+        .textures
+        .first()
+        .ok_or_else(|| invalid_data("benchmark case needs exactly one texture"))?;
+    println!(
+        "Benchmark {label}: entrada {}x{}, {} mip(s) fornecido(s)",
+        source.width,
+        source.height,
+        source.mips.len()
+    );
+
+    let pc = export_profile(
+        "PC (PNG)",
+        &format!("bench_{label}_pc.glb"),
+        asset,
+        platform::pc::conversion_options(),
+        output_directory,
+    )?;
+    let switch_options = platform::switch::conversion_options();
+    let switch = export_profile(
+        &format!("Switch PNG ({SWITCH_TARGET_ID})"),
+        &format!("bench_{label}_switch.glb"),
+        asset,
+        switch_options.clone(),
+        output_directory,
+    )?;
+    if let Some(cap) = switch_options.max_texture_dimension {
+        for texture in &switch.textures {
+            if texture.width > cap || texture.height > cap {
+                return Err(invalid_data(format!(
+                    "Switch profile must cap the output at {cap}, got {}x{}",
+                    texture.width, texture.height
+                ))
+                .into());
+            }
+        }
+    }
+    print_vram_reduction(
+        "Switch PNG vs PC PNG",
+        pc.report.gpu_texture_bytes,
+        switch.report.gpu_texture_bytes,
+    );
+
+    #[cfg(feature = "pc-ktx2-basis")]
+    {
+        let pc_ktx2 = export_profile(
+            "PC (KTX2 UASTC)",
+            &format!("bench_{label}_pc_ktx2.glb"),
+            asset,
+            platform::pc::ktx2_conversion_options(scarlet_nexus_assets::config::BasisMode::Uastc),
+            output_directory,
+        )?;
+        print_vram_reduction(
+            "PC KTX2 UASTC vs PC PNG",
+            pc.report.gpu_texture_bytes,
+            pc_ktx2.report.gpu_texture_bytes,
+        );
+    }
+    #[cfg(feature = "switch-ktx2-astc")]
+    {
+        let astc_options = platform::switch::ktx2_astc_conversion_options();
+        // O protótipo KTX2 exige resolução nativa: o cap de 1024 do perfil Switch é
+        // aplicado na entrada, antes do encode UASTC -> transcode ASTC 4x4.
+        let mut astc_asset = asset.clone();
+        if let Some(cap) = astc_options.max_texture_dimension {
+            astc_asset.textures = vec![cap_texture_dimension(source, cap)?];
+        }
+        let astc = export_profile(
+            &format!("Switch KTX2 ASTC 4x4 ({SWITCH_TARGET_ID})"),
+            &format!("bench_{label}_switch_ktx2_astc.glb"),
+            &astc_asset,
+            astc_options,
+            output_directory,
+        )?;
+        print_vram_reduction(
+            "Switch KTX2 ASTC 4x4 vs Switch PNG",
+            switch.report.gpu_texture_bytes,
+            astc.report.gpu_texture_bytes,
+        );
+        print_vram_reduction(
+            "Switch KTX2 ASTC 4x4 vs PC PNG",
+            pc.report.gpu_texture_bytes,
+            astc.report.gpu_texture_bytes,
+        );
+    }
+    Ok(())
+}
+
+/// Downscale nearest-neighbor até `cap` na maior dimensão, preservando a proporção.
+fn cap_texture_dimension(texture: &TextureAsset, cap: u32) -> Result<TextureAsset, Box<dyn Error>> {
+    if cap == 0 {
+        return Err(invalid_data("dimension cap must be greater than zero").into());
+    }
+    let (width, height) = if texture.width <= cap && texture.height <= cap {
+        (texture.width, texture.height)
+    } else if texture.width >= texture.height {
+        let fitted = u64::from(texture.height)
+            .checked_mul(u64::from(cap))
+            .and_then(|value| value.checked_div(u64::from(texture.width)))
+            .ok_or_else(|| invalid_data("dimension fit overflow"))?
+            .max(1);
+        (cap, u32::try_from(fitted)?)
+    } else {
+        let fitted = u64::from(texture.width)
+            .checked_mul(u64::from(cap))
+            .and_then(|value| value.checked_div(u64::from(texture.height)))
+            .ok_or_else(|| invalid_data("dimension fit overflow"))?
+            .max(1);
+        (u32::try_from(fitted)?, cap)
+    };
+    if (width, height) == (texture.width, texture.height) {
+        return Ok(texture.clone());
+    }
+    let base = texture
+        .mips
+        .first()
+        .ok_or_else(|| invalid_data("texture has no base mip"))?;
+    let output_len = u64::from(width)
+        .checked_mul(u64::from(height))
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| invalid_data("resized texture size overflow"))?;
+    let output_len = usize::try_from(output_len)?;
+    let mut data = Vec::new();
+    data.try_reserve_exact(output_len)
+        .map_err(|_| invalid_data("cannot allocate resized texture"))?;
+    for y in 0..height {
+        let source_y = u64::from(y)
+            .checked_mul(u64::from(texture.height))
+            .and_then(|value| value.checked_div(u64::from(height)))
+            .ok_or_else(|| invalid_data("resize source row overflow"))?;
+        for x in 0..width {
+            let source_x = u64::from(x)
+                .checked_mul(u64::from(texture.width))
+                .and_then(|value| value.checked_div(u64::from(width)))
+                .ok_or_else(|| invalid_data("resize source column overflow"))?;
+            let source_index = usize::try_from(
+                source_y
+                    .checked_mul(u64::from(texture.width))
+                    .and_then(|row| row.checked_add(source_x))
+                    .and_then(|pixel| pixel.checked_mul(4))
+                    .ok_or_else(|| invalid_data("resize source index overflow"))?,
+            )?;
+            let pixel = base
+                .data
+                .get(source_index..source_index + 4)
+                .ok_or_else(|| invalid_data("resize sampled outside the source buffer"))?;
+            data.extend_from_slice(pixel);
+        }
+    }
+    Ok(TextureAsset {
+        name: texture.name.clone(),
+        width,
+        height,
+        format: texture.format,
+        color_space: texture.color_space,
+        mips: vec![MipLevel {
+            width,
+            height,
+            data,
+        }],
+    })
+}
+
+/// Textura RGBA8 determinística para o caso de fallback quando o fixture real
+/// não está presente no checkout.
+fn synthetic_texture(name: &str, width: u32, height: u32) -> Result<TextureAsset, Box<dyn Error>> {
+    let pixels = u64::from(width)
+        .checked_mul(u64::from(height))
+        .ok_or_else(|| invalid_data("synthetic texture dimensions overflow"))?;
+    let len = usize::try_from(
+        pixels
+            .checked_mul(4)
+            .ok_or_else(|| invalid_data("synthetic texture size overflow"))?,
+    )?;
+    let mut data = Vec::new();
+    data.try_reserve_exact(len)
+        .map_err(|_| invalid_data("cannot allocate synthetic texture"))?;
+    for index in 0..pixels {
+        let x = index % u64::from(width);
+        let y = index / u64::from(width);
+        data.extend_from_slice(&[
+            (x ^ (y << 3)) as u8,
+            (x.wrapping_add(y) & 0xff) as u8,
+            (x.wrapping_mul(3).wrapping_add(y.wrapping_mul(7)) & 0xff) as u8,
+            255,
+        ]);
+    }
+    Ok(TextureAsset {
+        name: name.to_owned(),
+        width,
+        height,
+        format: TextureFormat::Rgba8,
+        color_space: ColorSpace::Srgb,
+        mips: vec![MipLevel {
+            width,
+            height,
+            data,
+        }],
+    })
 }

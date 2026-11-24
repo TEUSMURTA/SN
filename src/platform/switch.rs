@@ -1,4 +1,4 @@
-use crate::config::{ConversionOptions, Limits, TextureTarget};
+use crate::config::{BasisMode, ConversionOptions, Limits, TextureTarget};
 use crate::model::GpuTextureFormat;
 use crate::platform::Platform;
 
@@ -36,6 +36,19 @@ pub fn conversion_options() -> ConversionOptions {
     }
 }
 
+/// Explicit opt-in for the Switch KTX2/ASTC 4x4 pipeline. The pipeline still
+/// rejects `TextureTarget::Ktx2Basis` on Switch unless the `switch-ktx2-astc`
+/// feature is enabled at compile time; the default profile stays PNG.
+#[must_use]
+pub fn ktx2_astc_conversion_options() -> ConversionOptions {
+    ConversionOptions {
+        platform: Platform::Switch,
+        texture_target: TextureTarget::Ktx2Basis,
+        basis_mode: BasisMode::Uastc,
+        ..conversion_options()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -69,5 +82,18 @@ mod tests {
             GpuTextureFormat::Astc4x4
         );
         options.validate().expect("Switch limits must be coherent");
+    }
+
+    #[test]
+    fn ktx2_astc_options_are_explicit_opt_in() {
+        let options = ktx2_astc_conversion_options();
+        assert_eq!(options.platform, Platform::Switch);
+        assert_eq!(options.texture_target, TextureTarget::Ktx2Basis);
+        assert_eq!(options.basis_mode, BasisMode::Uastc);
+        assert_eq!(options.max_texture_dimension, Some(1024));
+        assert_eq!(options.gpu_format(), GpuTextureFormat::Astc4x4);
+        options
+            .validate()
+            .expect("Switch KTX2 options must be coherent");
     }
 }

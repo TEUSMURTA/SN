@@ -549,6 +549,9 @@ fn push_textures_to_bin(
         let (mime_type, is_ktx2_basis) = match &tex.payload {
             PreparedTexturePayload::Png(_) => ("image/png", false),
             PreparedTexturePayload::Ktx2Basis(_) => ("image/ktx2", true),
+            // ASTC 4x4 nativo (vkFormat preenchido, sem supercompressão) é um
+            // KTX2 comum: vai como `source` direto, sem `KHR_texture_basisu`.
+            PreparedTexturePayload::Ktx2Astc(_) => ("image/ktx2", false),
         };
         uses_ktx2_basis |= is_ktx2_basis;
 
@@ -1300,6 +1303,110 @@ mod tests {
                 values.is_none_or(|list| !list.contains(&json!("KHR_texture_basisu"))),
                 "{key} must not list KHR_texture_basisu"
             );
+        }
+    }
+
+    #[cfg(feature = "switch-ktx2-astc")]
+    #[test]
+    fn exports_real_astc_ktx2_from_the_switch_pipeline_without_basisu() {
+        use crate::model::{Asset, MeshAsset, MipLevel, TextureAsset, TextureFormat};
+        use crate::platform::switch;
+
+        let source = Asset {
+            mesh: MeshAsset {
+                name: "astc_pipeline".to_owned(),
+                lods: vec![MeshLod {
+                    primitives: vec![Primitive {
+                        attributes: VertexAttributes {
+                            positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+                            ..VertexAttributes::default()
+                        },
+                        indices: vec![0, 1, 2],
+                        material: Some(0),
+                    }],
+                }],
+                skeleton: None,
+            },
+            textures: vec![TextureAsset {
+                name: "astc_tex".to_owned(),
+                width: 4,
+                height: 4,
+                format: TextureFormat::Rgba8,
+                color_space: ColorSpace::Srgb,
+                mips: vec![MipLevel {
+                    width: 4,
+                    height: 4,
+                    data: [255u8, 0, 0, 255].repeat(16),
+                }],
+            }],
+            materials: vec![Material {
+                name: "astc_material".to_owned(),
+                base_color_texture: Some(0),
+                ..Material::default()
+            }],
+        };
+        let options = switch::ktx2_astc_conversion_options();
+        let prepared =
+            crate::prepare_asset(&source, &options).expect("Switch ASTC pipeline must prepare");
+        assert!(matches!(
+            prepared.textures[0].payload,
+            PreparedTexturePayload::Ktx2Astc(_)
+        ));
+        // Switch + KTX2 -> ASTC 4x4; 4x4, 2x2 e 1x1 = 1 bloco de 16 bytes cada.
+        let gpu = prepared.textures[0]
+            .gpu
+            .expect("Switch KTX2 must declare its ASTC GPU footprint");
+        assert_eq!(gpu.format, GpuTextureFormat::Astc4x4);
+        assert_eq!((gpu.mip_count, gpu.byte_len), (3, 48));
+
+        let document =
+            build_glb_document(&prepared, &Limits::default()).expect("ASTC asset must export");
+        assert_eq!(document.report.gpu_texture_bytes, 48);
+
+        let json: Value = serde_json::from_slice(&document.json).expect("valid glTF JSON");
+        assert_eq!(json["images"][0]["mimeType"], "image/ktx2");
+        // ASTC nativo é KTX2 comum: `source` direto, sem KHR_texture_basisu.
+        assert_eq!(json["textures"][0]["source"], 0);
+        assert!(json["textures"][0].get("extensions").is_none());
+        for key in ["extensionsUsed", "extensionsRequired"] {
+            let values = json.get(key).and_then(Value::as_array);
+            assert!(
+                values.is_none_or(|list| !list.contains(&json!("KHR_texture_basisu"))),
+                "{key} must not list KHR_texture_basisu"
+            );
+        }
+
+        let view_index = usize::try_from(
+            json["images"][0]["bufferView"]
+                .as_u64()
+                .expect("bufferView index must be an integer"),
+        )
+        .expect("bufferView index must fit usize");
+        let offset = usize::try_from(
+            json["bufferViews"][view_index]["byteOffset"]
+                .as_u64()
+                .expect("bufferView offset must be an integer"),
+        )
+        .expect("bufferView offset must fit usize");
+        let length = usize::try_from(
+            json["bufferViews"][view_index]["byteLength"]
+                .as_u64()
+                .expect("byteLength must be an integer"),
+        )
+        .expect("byteLength must fit usize");
+        let payload = &document.binary[offset..offset + length];
+
+        let reader = ktx2::Reader::new(payload).expect("independent parser must accept the KTX2");
+        assert_eq!(reader.header().pixel_width, 4);
+        assert_eq!(reader.header().level_count, 3);
+        assert_eq!(
+            reader.header().format,
+            Some(ktx2::Format::ASTC_4x4_SRGB_BLOCK)
+        );
+        assert!(reader.header().supercompression_scheme.is_none());
+        assert_eq!(reader.color_model(), Some(ktx2::ColorModel::ASTC));
+        for level in reader.levels() {
+            assert_eq!(level.data.len() % 16, 0);
         }
     }
 

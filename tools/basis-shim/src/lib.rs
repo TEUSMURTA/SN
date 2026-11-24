@@ -9,7 +9,10 @@
 //! dos mips e contida neste módulo; nenhum outro código do workspace escreve
 //! blocos `unsafe`.
 
-pub use basis_universal::{ColorSpace as EncoderColorSpace, CompressorErrorCode};
+pub use basis_universal::{
+    ColorSpace as EncoderColorSpace, CompressorErrorCode, TranscodeError, TranscodeParameters,
+    Transcoder, TranscoderTextureFormat,
+};
 
 use basis_universal::{BasisTextureFormat, Compressor, CompressorParams};
 use thiserror::Error;
@@ -155,6 +158,113 @@ pub fn encode_basis(
     })
 }
 
+/// ASTC 4x4 usa blocos de 16 bytes, como o UASTC.
+pub const ASTC_BLOCK_BYTES: u64 = 16;
+
+#[derive(Debug, Error)]
+pub enum AstcTranscodeError {
+    #[error("the mip chain is empty")]
+    EmptyMipChain,
+    #[error("the .basis file is {0:?}, not UASTC")]
+    NotUastc(BasisTextureFormat),
+    #[error("the transcoder rejected the .basis file in prepare_transcoding")]
+    PrepareFailed,
+    #[error("image 0 has {actual} mip levels, but {expected} were requested")]
+    LevelCountMismatch { expected: usize, actual: u32 },
+    #[error("mip {level} is missing from the .basis file")]
+    LevelNotFound { level: usize },
+    #[error(
+        "mip {level} transcoded to {actual} bytes, expected {expected} for a {blocks} ASTC blocks"
+    )]
+    UnexpectedSize {
+        level: usize,
+        blocks: u64,
+        expected: u64,
+        actual: u64,
+    },
+    #[error("transcode of mip {level} failed: {error:?}")]
+    Failed { level: usize, error: TranscodeError },
+}
+
+/// Transcodifica cada nível de mip de um arquivo `.basis` UASTC (imagem 0) para
+/// blocos ASTC 4x4 RGBA, um buffer por nível na ordem do maior para o menor.
+///
+/// A validação do arquivo e das dimensões ocorre antes de cada chamada ao
+/// transcoder C++; o resultado de cada nível é conferido contra a contagem de
+/// blocos esperada (`ceil(w/4) * ceil(h/4)` blocos de 16 bytes).
+pub fn transcode_uastc_to_astc4x4(
+    basis: &[u8],
+    level_count: usize,
+) -> Result<Vec<Vec<u8>>, AstcTranscodeError> {
+    if level_count == 0 {
+        return Err(AstcTranscodeError::EmptyMipChain);
+    }
+    let transcoder = Transcoder::new();
+    let format = transcoder.basis_texture_format(basis);
+    if format != BasisTextureFormat::UASTC4x4 {
+        return Err(AstcTranscodeError::NotUastc(format));
+    }
+    let mut transcoder = transcoder;
+    transcoder
+        .prepare_transcoding(basis)
+        .map_err(|()| AstcTranscodeError::PrepareFailed)?;
+
+    let actual_levels = transcoder.image_level_count(basis, 0);
+    let expected_levels =
+        u32::try_from(level_count).map_err(|_| AstcTranscodeError::LevelCountMismatch {
+            expected: level_count,
+            actual: actual_levels,
+        })?;
+    if actual_levels != expected_levels {
+        return Err(AstcTranscodeError::LevelCountMismatch {
+            expected: level_count,
+            actual: actual_levels,
+        });
+    }
+
+    let mut levels = Vec::with_capacity(level_count);
+    for level in 0..level_count {
+        let level_index =
+            u32::try_from(level).map_err(|_| AstcTranscodeError::LevelNotFound { level })?;
+        let description = transcoder
+            .image_level_description(basis, 0, level_index)
+            .ok_or(AstcTranscodeError::LevelNotFound { level })?;
+        let blocks = u64::from(description.block_count);
+        let expected =
+            blocks
+                .checked_mul(ASTC_BLOCK_BYTES)
+                .ok_or(AstcTranscodeError::UnexpectedSize {
+                    level,
+                    blocks,
+                    expected: u64::MAX,
+                    actual: 0,
+                })?;
+        let output = transcoder
+            .transcode_image_level(
+                basis,
+                TranscoderTextureFormat::ASTC_4x4_RGBA,
+                TranscodeParameters {
+                    image_index: 0,
+                    level_index,
+                    ..TranscodeParameters::default()
+                },
+            )
+            .map_err(|error| AstcTranscodeError::Failed { level, error })?;
+        let actual = output.len() as u64;
+        if actual != expected {
+            return Err(AstcTranscodeError::UnexpectedSize {
+                level,
+                blocks,
+                expected,
+                actual,
+            });
+        }
+        levels.push(output);
+    }
+    transcoder.end_transcoding();
+    Ok(levels)
+}
+
 fn halve(dims: (u32, u32)) -> (u32, u32) {
     ((dims.0 / 2).max(1), (dims.1 / 2).max(1))
 }
@@ -238,5 +348,80 @@ mod tests {
         let error = encode_basis(BasisMode::Uastc, EncoderColorSpace::Srgb, &[])
             .expect_err("empty chain must fail");
         assert!(matches!(error, EncodeError::EmptyMipChain));
+    }
+
+    fn full_chain_mips() -> [MipInput<'static>; 3] {
+        const TWO_BY_TWO: [u8; 16] = [
+            0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255,
+        ];
+        const ONE_BY_ONE: [u8; 4] = [0, 0, 255, 255];
+        [
+            MipInput {
+                width: 4,
+                height: 4,
+                rgba: &FOUR_BY_FOUR_RED,
+            },
+            MipInput {
+                width: 2,
+                height: 2,
+                rgba: &TWO_BY_TWO,
+            },
+            MipInput {
+                width: 1,
+                height: 1,
+                rgba: &ONE_BY_ONE,
+            },
+        ]
+    }
+
+    #[test]
+    fn transcodes_uastc_levels_to_astc4x4() {
+        let encoded = encode_basis(
+            BasisMode::Uastc,
+            EncoderColorSpace::Srgb,
+            &full_chain_mips(),
+        )
+        .expect("UASTC chain must encode");
+        let levels = transcode_uastc_to_astc4x4(&encoded.bytes, 3)
+            .expect("UASTC must transcode to ASTC 4x4");
+        assert_eq!(levels.len(), 3);
+        for level in &levels {
+            // 4x4, 2x2 e 1x1 cobrem 1 bloco 4x4 cada: 16 bytes por nível.
+            assert_eq!(level.len() as u64, ASTC_BLOCK_BYTES);
+        }
+    }
+
+    #[test]
+    fn rejects_wrong_level_count_when_transcoding() {
+        let encoded = encode_basis(
+            BasisMode::Uastc,
+            EncoderColorSpace::Srgb,
+            &full_chain_mips(),
+        )
+        .expect("UASTC chain must encode");
+        let error = transcode_uastc_to_astc4x4(&encoded.bytes, 2)
+            .expect_err("level count must match the .basis file");
+        assert!(matches!(
+            error,
+            AstcTranscodeError::LevelCountMismatch {
+                expected: 2,
+                actual: 3
+            }
+        ));
+    }
+
+    #[test]
+    fn rejects_empty_transcode_chain() {
+        let error = transcode_uastc_to_astc4x4(&[0_u8; 77], 0).expect_err("empty chain must fail");
+        assert!(matches!(error, AstcTranscodeError::EmptyMipChain));
+    }
+
+    #[test]
+    fn rejects_non_uastc_basis_when_transcoding() {
+        let encoded = encode_basis(BasisMode::Etc1s, EncoderColorSpace::Linear, &base_mips())
+            .expect("ETC1S must encode");
+        let error = transcode_uastc_to_astc4x4(&encoded.bytes, 1)
+            .expect_err("ETC1S must not transcode through the UASTC path");
+        assert!(matches!(error, AstcTranscodeError::NotUastc(_)));
     }
 }
